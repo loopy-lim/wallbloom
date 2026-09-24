@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "generate:bridge": "bunx --no-install rustra codegen --config rustra.json",
-    "check:bridge": "bunx --no-install rustra codegen --config rustra.json --check",
+    "generate:bridge": "bunx --package @rustra/cli@0.11.3 rustra codegen --config rustra.json",
+    "check:bridge": "bunx --package @rustra/cli@0.11.3 rustra codegen --config rustra.json --check",
     "generate:openui": "openui --no-telemetry --agent-name pi generate --spec src/lib/library-info.tsx --out src/generated/library-info.spec.json",
     "build": "tsc && vite build",
     "test": "vitest run",

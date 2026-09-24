@@ -6,9 +6,9 @@
 
 - **M1** 구현 및 과거 성능 수치는 기존 기록이며 이번 감사에서 CPU/RAM 재측정하지 않음.
 - **M2** 이번 integrated acceptance는 initial 1627 ms와 자동 OS click 1492 ms 후 키보드 보고서 timeout, exit 2/FAIL. 전체 통합 완료가 아니다.
-- **M3** web wallpkg/grid/demo UI와 WebKit/WebGL runtime은 검사됨. `verify-web.sh` exit 0, `runtime_failures=0`. 최신 무거운 reactive shader CPU 평균/최대 13.946%/92.500%; 경량 기본 WebGL 직전 측정 13.531%/93.300% (각 13 samples). 두 모드 모두 <10% 목표 FAIL. 저전력·다중 Spaces·물리 마우스 미검증.
-- 최종 직렬 acceptance: `make -B`, bridge, UI tests 9/9/build, Rust 16/16/check, scene, registry, hotswap, web, web-perf 스크립트 및 integrated, `git diff --check` 모두 명령 exit 0. 단, web CPU <10%는 성능 판정 FAIL이며 HITL/다중 Space/Unity·Unreal 항목은 미완료. 상세 수치/증거는 `MEASUREMENTS.md`.
-- 최종 integrated fixture 자동 전환은 1657/1717/1600 ms; 영상 엔진 프로세스 CPU 평균 0.42%, RSS 평균 53.98 MiB/최대 54.73 MiB (15 samples). 이는 물리 마우스 HITL이 아니며 별도 웹 트리 CPU는 평균 13.946%로 목표 FAIL.
+- **M3** web wallpkg/grid/demo UI와 WebKit/WebGL runtime은 검사됨. `verify-web.sh` exit 0, `runtime_failures=0`. 이번 전체 재실행에서 무거운 reactive shader CPU 평균/최대 14.638%/90.500% (13 samples); 경량 기본 WebGL 직전 측정 13.531%/93.300% (13 samples). 두 모드 모두 <10% 목표 FAIL. 저전력·다중 Spaces·물리 마우스 미검증.
+- 이번 직렬 acceptance는 integrated 단계에서 exit 2로 중단되어 전체 FAIL; 그 이전 `make -B`, install, bridge check, UI 9/9/build, Rust 16/16/check, scene, registry, hotswap, web, web-perf는 exit 0. `git diff --check`는 && 체인에서 실행되지 않아 별도로 확인해야 함. web CPU <10% 성능 목표는 FAIL. HITL/다중 Space/Unity·Unreal 미완료. 상세 수치/증거는 `MEASUREMENTS.md` 및 이번 작업 결과.
+- 이번 integrated 재실행은 초기 Enter 입력 후 `gui-integrated-initial-input.json` 대기 timeout, exit 2/FAIL로 전환 측정이 생성되지 않음. 이전 integrated fixture 결과(1657/1717/1600 ms; 엔진 CPU 평균 0.42%, RSS 평균 53.98 MiB/최대 54.73 MiB, 15 samples)는 과거 자동 전환 결과이며 물리 마우스 HITL이 아니다.
 - Spaces probe는 video/web 모두 단일 Space 환경을 보고했으며 현재 Space에서 가시 픽셀 확인. 다중 Space 순환은 계측되지 않았다. 저전력 모드는 권한 부족으로 HITL 대기. 물리 입력도 미완료.
 - M5 scene fixture의 캡처/child 종료와 archive round-trip/안전성/local HTTP registry fixture는 통과. 외부 GitHub 실서비스 및 Unity/Unreal 미검증. Unity Hub/Editor, Epic Games Launcher/Unreal Editor 및 standalone player가 없어 M5 런타임 실측은 불가로 판정(호환 실패 아님); 상세 검색/후속 절차는 `docs/ROADMAP.md`. 사용자 실행 방법: `bash ui/scripts/physical-input-hitl.sh`에서 실제 입력; 저전력은 기존 `pmset -g custom` 저장 후 `sudo pmset -a lowpowermode 1` 확인 및 원복. 자동화/미실행은 PASS가 아니다. M4 Windows 미완료.
 - rustra 생성 계약 drift 검사 `cd ui && bun run check:bridge`도 종료 코드 0. 생성 scan + rustra download-progress 이벤트가 실제 Tauri transport를 사용하고 select/download는 기존 native command 경로를 유지한다.
