@@ -6,8 +6,8 @@
 | 구성 | CPU (%) | RAM | 비고 |
 |---|---|---|---|
 | Dynamic Wallpaper (상용, 제거 전 기준선) | 8.3 (앱 4.0 + VTDecoder 4.3) | 822 MB | 소프트웨어 경로 H.264 |
-| Videowall + H.264 4K | 7.7 (앱 4.8 + 디코더 2.9) | 62 MB | 해상도 제한 적용 |
-| **Videowall + HEVC(hvc1) 4K** | **2.2** | **20 MB** | 미디어 엔진(ASIC) 디코딩 |
+| Wallbloom + H.264 4K | 7.7 (앱 4.8 + 디코더 2.9) | 62 MB | 해상도 제한 적용 |
+| **Wallbloom + HEVC(hvc1) 4K** | **2.2** | **20 MB** | 미디어 엔진(ASIC) 디코딩 |
 
 ## 교훈
 

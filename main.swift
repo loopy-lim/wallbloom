@@ -1,9 +1,9 @@
-// Videowall — minimal native macOS video wallpaper
+// Wallbloom — minimal native macOS video wallpaper
 //
 // 영상 배경화면을 데스크톱 레벨에서 루프 재생하는 최소 앱.
 // AVPlayerLayer(AVFoundation) 하드웨어 디코딩을 사용한다. 서드파티 의존성 없음.
 //
-// 사용법: Videowall [영상파일경로]
+// 사용법: Wallbloom [영상파일경로]
 //   경로를 주지 않으면 기본 후보 경로 중 존재하는 것을 재생한다.
 
 import AppKit
@@ -12,7 +12,7 @@ import AVFoundation
 /// 기본 영상 후보 (순서대로 존재 확인)
 let DEFAULT_VIDEO_CANDIDATES = [
     URL(fileURLWithPath: "sample-hevc.mp4"),  // 작업 디렉토리
-    URL(fileURLWithPath: NSString("~").expandingTildeInPath + "/Movies/videowall.mp4"),
+    URL(fileURLWithPath: NSString("~").expandingTildeInPath + "/Movies/wallbloom.mp4"),
 ]
 
 func resolveDefaultVideo() -> URL {
@@ -131,7 +131,7 @@ final class WallpaperController: NSObject {
 
         menu.addItem(.separator())
         let quit = NSMenuItem(
-            title: "Videowall 종료",
+            title: "Wallbloom 종료",
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         )
