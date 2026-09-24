@@ -15,6 +15,7 @@ export type WallPackage = {
   path: string;
   previewPath?: string | null;
   packageType: string;
+  gravity: string;
 };
 
 export type ScanLibraryInput = Record<string, unknown>;

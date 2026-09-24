@@ -62,12 +62,41 @@ wallpkg의 정체성은 폴더의 basename이다. `wall.json`의 `id`는 폴더�
 | `preview` | string | — | `"preview.png"` | 패키지 폴더 기준 썸네일 상대 경로. 16:9 권장 |
 | `loop` | bool | — | `true` | 영상 반복 여부 |
 | `volume` | number | — | `0.0` | `0.0` 이상 `1.0` 이하 |
-| `gravity` | string | — | `"cover"` | `"cover"` 또는 `"contain"` |
+| `gravity` | string | — | `"cover"` | `"cover"`, `"contain"`, `"stretch"` 중 하나. 그 외 값과 누락은 `"cover"` 폴백(아래 gravity 절) |
 | `author` | string | — | — | 저자 표시 |
 | `source` | string | — | — | 원본 URL 또는 출처 |
 
 M2 엔진은 `type: "video"`만 적용한다. video의 `entry`는 H.264 또는 HEVC
 `hvc1` 태그의 mp4여야 한다. `hev1`은 지원하지 않는다.
+
+#### gravity (화면 맞춤 모드)
+
+`gravity`는 영상이 화면 프레임에 맞춰지는 방식을 정한다. 유효한 값은 세 가지다.
+
+| 값 | 의미 | AVPlayerLayer 매핑 | CSS object-fit 동등값 |
+|---|---|---|---|
+| `"cover"`(기본) | 종횡비 유지, 화면을 가득 채우고 넘치는 부분 잘라내기 | `.resizeAspectFill` | `cover` |
+| `"contain"` | 종횡비 유지, 영상 전체가 보이도록 맞추고 남는 부분은 투명/검정 | `.resizeAspect` | `contain` |
+| `"stretch"` | 종횡비 무시, 화면 프레임에 강제 늘리기 | `.resize` | `fill` |
+
+규칙:
+
+1. 값이 없거나 목록 밖의 값이면 `"cover"`로 폴백한다. 폴백은 패키지 전체를
+   무효로 만들지 않는다.
+2. video 타입에서 엔진은 이 값을 `AVPlayerLayer.videoGravity`로 매핑한다.
+3. web 타입에서 동등한 동작은 패키지 CSS의 책임이다. 저자는 배경 요소에
+   `object-fit`(`cover`/`contain`/`fill`)을 직접 지정해야 하며, 엔진이 web
+   콘텐츠의 CSS를 대신 주입하거나 덮어쓰지 않는다. active.json의 gravity
+   오버라이드(§3)는 web 패키지에 적용되지 않는다.
+4. scene 타입에서 화면 맞춤은 런타임의 재량이다. 엔진은 자식 프로세스에
+   gravity를 전달하지 않고, scene 저자가 자체적으로 정책을 정한다.
+5. 이 필드는 v0.2에 존재했던 `cover`/`contain` 계약을 포함하는 상위 호환
+   확장이다. 기존 `"cover"`, `"contain"` 매니페스트는 동일하게 동작한다.
+
+active.json의 선택적 `gravity` 오버라이드는 같은 패키지를 다른 모드로
+보여주는 사용자 선택이며, wallpkg 파일을 수정하지 않는다. 우선순위는
+"active.json 오버라이드 > wall.json `gravity` > `"cover"`"이다. 오버라이드
+값도 목록 밖이면 `"cover"`로 폴백한다.
 
 ### Web 패키지 (M3 macOS)
 
@@ -221,7 +250,8 @@ macOS 고정 위치:
 {
   "spec": 0.2,
   "active": "/Users/loopy/Library/Application Support/Wallbloom/library/sunset-waves",
-  "paused": false
+  "paused": false,
+  "gravity": "contain"
 }
 ```
 
@@ -230,6 +260,13 @@ macOS 고정 위치:
 | `spec` | number | ✅ | — | `0.2`; 그 외 버전은 적용하지 않음 |
 | `active` | string | ✅ | — | wallpkg 폴더의 표준화된 절대 경로 또는 `"none"` |
 | `paused` | bool | — | `false` | UI가 정하는 전역 일시정지 상태 |
+| `gravity` | string | — | 없음(wallpkg `gravity` 따름) | 화면 맞춤 모드 오버라이드. `"cover"`, `"contain"`, `"stretch"` 중 하나. 목록 밖 값은 `"cover"` 폴백 |
+
+`gravity` 오버라이드는 UI가 패키지 파일을 수정하지 않고 선택 모드를 바꾸는
+유일한 경로다. video 타입에서 엔진은 이 필드가 바뀌면 핫스왑(윈도우·플레이어
+재구성) 없이 기존 `AVPlayerLayer.videoGravity`만 즉시 갱신한다. 필드를
+제거하면 다시 wallpkg의 `gravity` 기본값을 따른다. web·scene 타입에는
+오버라이드가 적용되지 않는다(위 gravity 절의 3·4번 규칙).
 
 알 수 없는 필드는 무시한다. `active`가 상대 경로거나 대상 wallpkg가 §2 검증을
 통과하지 못하면 active.json 전체를 적용하지 않는다. `"none"`은 재생을 멈추고
@@ -245,7 +282,7 @@ macOS 고정 위치:
 UI는 다음 순서를 지켜야 한다.
 
 1. Application Support 루트와 `library/`를 필요하면 먼저 생성한다.
-2. 현재 유효한 active.json을 읽어 `active`, `paused`의 의미 값이 같으면 쓰지
+2. 현재 유효한 active.json을 읽어 `active`, `paused`, `gravity`의 의미 값이 같으면 쓰지
    않는다.
 3. active.json과 **같은 디렉터리**에 충돌하지 않는 임시 파일
    (`active.json.<pid>.<uuid>.tmp`)을 생성한다.
@@ -266,13 +303,15 @@ M2 macOS 엔진은 구현이 단순하고 rename에 안전한 **내용 기반 �
    바이트를 읽는다.
 2. `mtime`이나 파일 크기만으로 변경 여부를 판단하지 않는다. 같은 크기의 JSON
    교체를 놓칠 수 있기 때문이다. 직전에 관측한 바이트와 다를 때 파싱하고,
-   유효한 정규화 상태(`active`, `paused`)가 마지막 적용 상태와 다를 때만
+   유효한 정규화 상태(`active`, `paused`, `gravity` 오버라이드)가 마지막 적용 상태와 다를 때만
    적용한다.
 3. 읽기 중 `ENOENT`가 발생하면 rename 경계일 수 있으므로 오류 상태를 적용하지
    않고 다음 주기에 다시 읽는다.
 4. `active`가 바뀌면 새 wallpkg를 완전히 검증한 뒤에만 모든 화면의 player와
    window를 교체한다. 실패하면 기존 player/window를 유지한다.
 5. `paused`만 바뀌면 window를 재구성하지 않고 player에 play/pause만 적용한다.
+   `gravity` 오버라이드만 바뀌면 window·player를 재구성하지 않고 현재
+   플레이어 레이어의 `videoGravity`만 즉시 갱신한다.
    실제 재생 여부는 `active.json.paused`, 메뉴바의 사용자 일시정지, macOS
    저전력 모드 중 하나라도 참이면 일시정지다.
 6. `active: "none"`은 player/window를 정리하지만 메뉴바와 감시는 유지한다.

@@ -11,6 +11,15 @@ pub struct WallPackage {
     pub path: String,
     pub preview_path: Option<String>,
     pub package_type: String,
+    pub gravity: String,
+}
+
+/// gravity 문자열을 유효한 모드로 정규화한다. 누락/무효 값은 cover 폴백(WALLPKG_SPEC §2 gravity).
+fn normalize_gravity(value: &str) -> String {
+    match value {
+        "contain" | "stretch" => value.to_string(),
+        _ => "cover".to_string(),
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -19,6 +28,8 @@ struct ActiveFile {
     active: String,
     #[serde(default)]
     paused: bool,
+    #[serde(default)]
+    gravity: Option<String>,
 }
 
 #[tauri::command]
@@ -234,6 +245,42 @@ fn select_wallpaper(id: String) -> Result<(), String> {
     write_active(&root, &package.path)
 }
 
+#[derive(serde::Serialize)]
+struct ActiveState {
+    active: Option<String>,
+    paused: bool,
+    gravity: Option<String>,
+}
+
+#[tauri::command]
+fn read_active() -> Result<ActiveState, String> {
+    Ok(read_active_at(&app_root()?))
+}
+
+fn read_active_at(root: &Path) -> ActiveState {
+    let current = fs::read(root.join("active.json")).ok()
+        .and_then(|bytes| serde_json::from_slice::<ActiveFile>(&bytes).ok())
+        .filter(|current| current.spec == 0.2);
+    match current {
+        Some(current) => ActiveState {
+            active: Some(current.active),
+            paused: current.paused,
+            gravity: current.gravity.as_deref().map(normalize_gravity),
+        },
+        None => ActiveState { active: None, paused: false, gravity: None },
+    }
+}
+
+/// 선택된 패키지의 화면 맞춤 모드를 active.json gravity 오버라이드로 원자적으로 기록한다.
+#[tauri::command]
+fn set_wallpaper_gravity(id: String, gravity: String) -> Result<(), String> {
+    let root = app_root()?;
+    let library = root.join("library");
+    let package = scan_library_at(&library)?.into_iter().find(|item| item.id == id)
+        .ok_or_else(|| format!("유효한 wallpkg를 찾을 수 없습니다: {id}"))?;
+    write_active_gravity(&root, &package.path, &gravity)
+}
+
 fn app_root() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME")
         .ok_or_else(|| "사용자 홈 디렉터리를 확인할 수 없습니다".to_string())?;
@@ -276,8 +323,9 @@ fn validate_package(path: &Path) -> Option<WallPackage> {
     let preview_name = value.get("preview").and_then(Value::as_str).unwrap_or("preview.png");
     let preview_path = safe_file(&dir, preview_name).filter(|p| p.is_file())
         .map(|p| p.to_string_lossy().into_owned());
+    let gravity = normalize_gravity(value.get("gravity").and_then(Value::as_str).unwrap_or("cover"));
     Some(WallPackage { id: id.to_string(), title: title.to_string(),
-        path: dir.to_string_lossy().into_owned(), preview_path, package_type: package_type.to_string() })
+        path: dir.to_string_lossy().into_owned(), preview_path, package_type: package_type.to_string(), gravity })
 }
 
 #[cfg(unix)]
@@ -293,22 +341,48 @@ fn safe_file(root: &Path, relative: &str) -> Option<PathBuf> {
 }
 
 fn write_active(root: &Path, active: &str) -> Result<(), String> {
-    fs::create_dir_all(root.join("library")).map_err(|e| e.to_string())?;
-    let destination = root.join("active.json");
-    if let Ok(bytes) = fs::read(&destination) {
-        if let Ok(current) = serde_json::from_slice::<ActiveFile>(&bytes) {
-            if current.spec == 0.2 && current.active == active && !current.paused { return Ok(()); }
-        }
+    let current = fs::read(root.join("active.json")).ok()
+        .and_then(|bytes| serde_json::from_slice::<ActiveFile>(&bytes).ok())
+        .filter(|current| current.spec == 0.2);
+    if let Some(current) = &current {
+        if current.active == active && !current.paused && current.gravity.is_none() { return Ok(()); }
     }
+    // 같은 패키지 재선택은 사용자의 gravity 오버라이드를 유지하고, 다른 패키지 선택은 초기화한다.
+    let gravity = match &current {
+        Some(current) if current.active == active => current.gravity.clone(),
+        _ => None,
+    };
+    let mut payload = serde_json::json!({"spec":0.2,"active":active,"paused":false});
+    if let Some(gravity) = gravity { payload["gravity"] = Value::String(gravity); }
+    write_active_payload(root, payload)
+}
+
+fn write_active_gravity(root: &Path, active: &str, gravity: &str) -> Result<(), String> {
+    if !matches!(gravity, "cover" | "contain" | "stretch") {
+        return Err("gravity는 cover, contain, stretch 중 하나여야 합니다".into());
+    }
+    let current = fs::read(root.join("active.json")).ok()
+        .and_then(|bytes| serde_json::from_slice::<ActiveFile>(&bytes).ok())
+        .filter(|current| current.spec == 0.2);
+    let (same_active, paused, previous) = match &current {
+        Some(current) if current.active == active => (true, current.paused, current.gravity.clone()),
+        _ => (false, false, None),
+    };
+    if same_active && !paused && previous.as_deref() == Some(gravity) { return Ok(()); }
+    write_active_payload(root, serde_json::json!({"spec":0.2,"active":active,"paused":paused,"gravity":gravity}))
+}
+
+fn write_active_payload(root: &Path, payload: Value) -> Result<(), String> {
+    fs::create_dir_all(root.join("library")).map_err(|e| e.to_string())?;
     let temp = root.join(format!("active.json.{}.{}.tmp", std::process::id(), Uuid::new_v4()));
     let result = (|| {
         let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&temp).map_err(|e| e.to_string())?;
-        serde_json::to_writer(&mut file, &serde_json::json!({"spec":0.2,"active":active,"paused":false})).map_err(|e| e.to_string())?;
+        serde_json::to_writer(&mut file, &payload).map_err(|e| e.to_string())?;
         file.write_all(b"\n").map_err(|e| e.to_string())?;
         file.flush().map_err(|e| e.to_string())?;
         file.sync_all().map_err(|e| e.to_string())?;
         drop(file);
-        fs::rename(&temp, &destination).map_err(|e| e.to_string())?;
+        fs::rename(&temp, root.join("active.json")).map_err(|e| e.to_string())?;
         Ok(())
     })();
     if result.is_err() { let _ = fs::remove_file(&temp); }
@@ -337,7 +411,7 @@ pub fn run() {
     let builder = rustra::tauri_support::register(bridge::package(), tauri::Builder::default());
     #[cfg(feature = "native-acceptance")]
     let builder = builder
-        .invoke_handler(tauri::generate_handler![scan_library, select_wallpaper, download_wallpaper, import_wallpkg, export_wallpkg, fetch_registry, install_registry_entry, install_web_demo, rustra::tauri_support::rustra_dispatch, gui_acceptance_report])
+        .invoke_handler(tauri::generate_handler![scan_library, select_wallpaper, set_wallpaper_gravity, read_active, download_wallpaper, import_wallpkg, export_wallpkg, fetch_registry, install_registry_entry, install_web_demo, rustra::tauri_support::rustra_dispatch, gui_acceptance_report])
         .on_page_load(|webview, payload| {
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                 if std::env::var_os("WALLBLOOM_INTEGRATED").is_some() {
@@ -350,7 +424,7 @@ pub fn run() {
             }
         });
     #[cfg(not(feature = "native-acceptance"))]
-    let builder = builder.invoke_handler(tauri::generate_handler![scan_library, select_wallpaper, download_wallpaper, import_wallpkg, export_wallpkg, fetch_registry, install_registry_entry, install_web_demo, rustra::tauri_support::rustra_dispatch]);
+    let builder = builder.invoke_handler(tauri::generate_handler![scan_library, select_wallpaper, set_wallpaper_gravity, read_active, download_wallpaper, import_wallpkg, export_wallpkg, fetch_registry, install_registry_entry, install_web_demo, rustra::tauri_support::rustra_dispatch]);
     builder.run(app_context())
         .expect("error while running Wallbloom");
 }
@@ -530,5 +604,76 @@ mod tests {
         assert_eq!(active["paused"], false);
         assert_eq!(active["spec"], 0.2);
         assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 2); // library + active.json
+    }
+
+    #[test]
+    fn gravity_override_writes_atomically_and_preserves_paused() {
+        let temp = tempfile::tempdir().unwrap();
+        write_active(temp.path(), "/library/sunset-waves").unwrap();
+        write_active_gravity(temp.path(), "/library/sunset-waves", "contain").unwrap();
+        let active: Value = serde_json::from_slice(&fs::read(temp.path().join("active.json")).unwrap()).unwrap();
+        assert_eq!(active["gravity"], "contain");
+        assert_eq!(active["paused"], false);
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 2, "임시 파일을 남기지 않는다");
+    }
+
+    #[test]
+    fn gravity_override_rejects_invalid_modes_without_touching_state() {
+        let temp = tempfile::tempdir().unwrap();
+        write_active(temp.path(), "/library/sunset-waves").unwrap();
+        let before = fs::read(temp.path().join("active.json")).unwrap();
+        assert!(write_active_gravity(temp.path(), "/library/sunset-waves", "diagonal").is_err());
+        assert_eq!(fs::read(temp.path().join("active.json")).unwrap(), before);
+    }
+
+    #[test]
+    fn gravity_override_is_idempotent_for_identical_semantic_state() {
+        let temp = tempfile::tempdir().unwrap();
+        write_active_gravity(temp.path(), "/library/sunset-waves", "stretch").unwrap();
+        let before = fs::read(temp.path().join("active.json")).unwrap();
+        write_active_gravity(temp.path(), "/library/sunset-waves", "stretch").unwrap();
+        assert_eq!(fs::read(temp.path().join("active.json")).unwrap(), before);
+    }
+
+    #[test]
+    fn reselection_keeps_override_for_same_package_and_resets_it_for_a_new_one() {
+        let temp = tempfile::tempdir().unwrap();
+        write_active_gravity(temp.path(), "/library/sunset-waves", "contain").unwrap();
+        write_active(temp.path(), "/library/sunset-waves").unwrap();
+        let active: Value = serde_json::from_slice(&fs::read(temp.path().join("active.json")).unwrap()).unwrap();
+        assert_eq!(active["gravity"], "contain");
+        write_active(temp.path(), "/library/other").unwrap();
+        let active: Value = serde_json::from_slice(&fs::read(temp.path().join("active.json")).unwrap()).unwrap();
+        assert!(active.get("gravity").is_none());
+    }
+
+    #[test]
+    fn read_active_normalizes_and_reports_the_override() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(read_active_at(temp.path()).active, None);
+        write_active_gravity(temp.path(), "/library/sunset-waves", "stretch").unwrap();
+        let state = read_active_at(temp.path());
+        assert_eq!(state.active.as_deref(), Some("/library/sunset-waves"));
+        assert_eq!(state.gravity.as_deref(), Some("stretch"));
+        fs::write(temp.path().join("active.json"), r#"{"spec":0.2,"active":"/library/sunset-waves","paused":true,"gravity":"diagonal"}"#).unwrap();
+        let state = read_active_at(temp.path());
+        assert_eq!(state.paused, true);
+        assert_eq!(state.gravity.as_deref(), Some("cover"));
+    }
+
+    #[test]
+    fn scan_normalizes_manifest_gravity_with_cover_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        for (id, gravity) in [("waves", "contain"), ("bogus", "diagonal"), ("plain", "cover")] {
+            let pkg = temp.path().join(id);
+            fs::create_dir(&pkg).unwrap();
+            fs::write(pkg.join("clip.mp4"), b"video").unwrap();
+            fs::write(pkg.join("wall.json"), format!(r#"{{"spec":0.2,"id":"{id}","title":"{id}","type":"video","entry":"clip.mp4","gravity":"{gravity}"}}"#)).unwrap();
+        }
+        let packages = scan_library_at(temp.path()).unwrap();
+        let gravity_of = |id: &str| packages.iter().find(|p| p.id == id).unwrap().gravity.clone();
+        assert_eq!(gravity_of("waves"), "contain");
+        assert_eq!(gravity_of("bogus"), "cover");
+        assert_eq!(gravity_of("plain"), "cover");
     }
 }

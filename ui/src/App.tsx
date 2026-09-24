@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { scanLibrary, onDownloadProgress, type WallPackage } from "./lib/bridge";
 import { LibraryInfoPanel } from "./components/LibraryInfoPanel";
+import { GravityModeSelector, gravityLabel, isGravityMode, type GravityMode } from "./components/GravityModeSelector";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -17,6 +18,15 @@ export default function App() {
   const [registryUrl, setRegistryUrl] = useState("https://raw.githubusercontent.com/wallbloom/registry/main/index.json");
   const [registry, setRegistry] = useState<Array<{ id: string; title: string; type: string; version: string; download_url: string; sha256: string }>>([]);
   const [registryLoading, setRegistryLoading] = useState(false);
+  const [activeState, setActiveState] = useState<{ active: string | null; gravity: GravityMode | null }>({ active: null, gravity: null });
+  const [gravityChanging, setGravityChanging] = useState(false);
+
+  const refreshActive = useCallback(async () => {
+    try {
+      const state = await invoke<{ active: string | null; paused: boolean; gravity: string | null } | null>("read_active");
+      setActiveState({ active: state?.active ?? null, gravity: isGravityMode(state?.gravity) ? state.gravity : null });
+    } catch { setActiveState({ active: null, gravity: null }); }
+  }, []);
 
   const scan = useCallback(async () => {
     setLoading(true);
@@ -24,12 +34,13 @@ export default function App() {
     try {
       const result = await scanLibrary({});
       setPackages(result);
+      await refreshActive();
       setStatus(result.length ? "라이브러리를 불러왔습니다." : "라이브러리가 비어 있습니다. URL로 배경화면을 추가해 보세요.");
     } catch (error) {
       setPackages([]);
       setStatus(`라이브러리 스캔 실패: ${String(error)}`);
     } finally { setLoading(false); }
-  }, []);
+  }, [refreshActive]);
 
   useEffect(() => { void scan(); }, [scan]);
 
@@ -38,8 +49,31 @@ export default function App() {
     try {
       await invoke("select_wallpaper", { id: item.id });
       setSelected(item);
+      // 같은 패키지 재선택은 오버라이드를 유지하고, 다른 패키지 선택은 초기화한다(Rust와 동일 계약).
+      setActiveState(prev => ({ active: item.path, gravity: prev.active === item.path ? prev.gravity : null }));
       setStatus(`${item.title}을(를) 선택했습니다.`);
     } catch (error) { setStatus(`선택 실패: ${String(error)}`); }
+  }
+
+  const selectedGravity: GravityMode = (() => {
+    if (!selected) return "cover";
+    // 우선순위: active.json 오버라이드 > wallpkg gravity > cover (WALLPKG_SPEC §2/§3).
+    const override = activeState.active === selected.path ? activeState.gravity : null;
+    return override ?? (isGravityMode(selected.gravity) ? selected.gravity : "cover");
+  })();
+
+  async function changeGravity(mode: GravityMode) {
+    if (!selected || gravityChanging) return;
+    setGravityChanging(true);
+    const previous = selectedGravity;
+    try {
+      await invoke("set_wallpaper_gravity", { id: selected.id, gravity: mode });
+      setActiveState({ active: selected.path, gravity: mode });
+      setStatus(`${selected.title} 화면 맞춤을 ${gravityLabel(mode)}(으)로 바꿨습니다.`);
+    } catch (error) {
+      setActiveState({ active: selected.path, gravity: previous });
+      setStatus(`화면 맞춤 변경 실패: ${String(error)}`);
+    } finally { setGravityChanging(false); }
   }
 
   async function download() {
@@ -101,7 +135,10 @@ export default function App() {
           </button>)}
         </div>}
       {!loading && <LibraryInfoPanel packages={packages} selected={selected} />}
-      {selected && <Button className="mt-3" variant="outline" onClick={() => void invoke("export_wallpkg", { id: selected.id }).then(() => setStatus(`${selected.title}을(를) wallpkg로 내보냈습니다.`)).catch(error => setStatus(`내보내기 실패: ${String(error)}`))}>선택 항목 wallpkg 내보내기</Button>}
+      {selected && <div className="mt-4 flex flex-col gap-3 rounded-xl border border-white/10 bg-card/50 p-4 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+        <GravityModeSelector mode={selectedGravity} disabled={gravityChanging} onChange={mode => void changeGravity(mode)} />
+        <Button variant="outline" onClick={() => void invoke("export_wallpkg", { id: selected.id }).then(() => setStatus(`${selected.title}을(를) wallpkg로 내보냈습니다.`)).catch(error => setStatus(`내보내기 실패: ${String(error)}`))}>선택 항목 wallpkg 내보내기</Button>
+      </div>}
     </main>
     <aside className="my-6 rounded-xl border border-indigo-400/20 bg-indigo-400/5 p-4 text-sm text-slate-300"><strong className="block text-foreground">Web 배경화면 상호작용</strong><p className="mt-1">Web 배경은 기본적으로 클릭을 통과합니다. 배경에서 직접 상호작용하려면 메뉴 막대의 ‘Web 상호작용 시작’을 사용하고, 종료는 Escape 또는 메뉴 막대에서 할 수 있습니다.</p></aside>
     <footer className="mt-6 min-h-12 border-t border-white/10 pt-4 text-sm text-slate-300"><p role="status" aria-live="polite">{status}</p></footer>

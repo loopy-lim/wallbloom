@@ -24,6 +24,7 @@
         "WallPackage": {
           "type": "object",
           "required": [
+            "gravity",
             "id",
             "packageType",
             "path",
@@ -46,6 +47,9 @@
               ]
             },
             "packageType": {
+              "type": "string"
+            },
+            "gravity": {
               "type": "string"
             }
           }

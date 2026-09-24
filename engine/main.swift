@@ -34,6 +34,15 @@ final class WallpaperWindow: NSWindow {
     override var canBecomeKey: Bool { !ignoresMouseEvents }
 }
 
+/// gravity 문자열을 유효한 모드로 정규화한다. 누락/무효 값은 cover 폴백(WALLPKG_SPEC §2 gravity).
+func normalizeGravity(_ raw: String?) -> String {
+    switch raw {
+    case "contain": return "contain"
+    case "stretch": return "stretch"
+    default: return "cover"
+    }
+}
+
 /// Private, immutable rendering copy: policy precedes every untrusted HTML byte.
 /// Never rewrite the installed package or trust a package-authored CSP.
 final class WebPackage {
@@ -106,7 +115,11 @@ final class WallpaperController: NSObject {
     private var escapeMonitor: Any?
     private var windows: [NSWindow] = []
     private var players: [AVQueuePlayer] = []
+    private var playerLayers: [AVPlayerLayer] = []
     private var loopers: [AVPlayerLooper] = []
+    // 화면 맞춤 모드: wallpkg gravity 기본값 + active.json 오버라이드(모두 정규화됨).
+    private var packageGravity = "cover"
+    private var activeGravityOverride: String?
     private var statusItem: NSStatusItem?
     private var lowPowerObserver: NSKeyValueObservation?
     private var isPausedByUser = false
@@ -157,13 +170,25 @@ final class WallpaperController: NSObject {
         }
     }
 
+    /// effective gravity = active.json 오버라이드 > wallpkg gravity > cover.
+    private var effectiveGravity: String { activeGravityOverride ?? packageGravity }
+    private var videoGravity: AVLayerVideoGravity {
+        switch effectiveGravity {
+        case "contain": return .resizeAspect
+        case "stretch": return .resize
+        default: return .resizeAspectFill
+        }
+    }
+
     private func pollActiveJSON() {
         guard let data = try? Data(contentsOf: activeJSONPath) else { return }
         guard data != lastAppliedData else { return }
 
         do {
             let state = try parseActiveState(data)
-            guard !hasAppliedContractState || state.active != lastAppliedActive || state.paused != isPausedByContract else { return }
+            let overrideGravity = state.gravity.map(normalizeGravity)
+            let gravityChanged = overrideGravity != activeGravityOverride
+            guard !hasAppliedContractState || state.active != lastAppliedActive || state.paused != isPausedByContract || gravityChanged else { return }
             if state.active != lastAppliedActive {
                 if state.active == "none" {
                     teardown()
@@ -180,6 +205,8 @@ final class WallpaperController: NSObject {
                     let sceneConfig = manifest?["type"] as? String == "scene" ? manifest?["scene"] as? [String: Any] : nil
                     lastAppliedActive = state.active
                     isPausedByContract = state.paused
+                    packageGravity = normalizeGravity(manifest?["gravity"] as? String)
+                    activeGravityOverride = overrideGravity
                     webPackage = preparedWeb
                     if let preparedWeb {
                         currentWebEntry = preparedWeb.entry
@@ -194,6 +221,10 @@ final class WallpaperController: NSObject {
                         buildWindows()
                     }
                 }
+            } else if gravityChanged {
+                // 동일 패키지에서 오버라이드만 바뀜: 핫스왑 재시작 없이 videoGravity만 즉시 적용.
+                activeGravityOverride = overrideGravity
+                applyVideoGravity()
             }
             isPausedByContract = state.paused
             hasAppliedContractState = true
@@ -204,7 +235,7 @@ final class WallpaperController: NSObject {
         }
     }
 
-    private func parseActiveState(_ data: Data) throws -> (active: String, paused: Bool) {
+    private func parseActiveState(_ data: Data) throws -> (active: String, paused: Bool, gravity: String?) {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let spec = object["spec"] as? NSNumber, spec.doubleValue == 0.2,
               let active = object["active"] as? String,
@@ -215,7 +246,7 @@ final class WallpaperController: NSObject {
         if active != "none" && (!active.hasPrefix("/") || active.contains("\0")) {
             throw ActiveJSONError.invalid
         }
-        return (active, pausedValue)
+        return (active, pausedValue, object["gravity"] as? String)
     }
 
     private func validateWallpkg(_ directory: URL) throws -> URL {
@@ -296,7 +327,8 @@ final class WallpaperController: NSObject {
             view.wantsLayer = true
             let playerLayer = view.playerLayer!
             playerLayer.player = player
-            playerLayer.videoGravity = .resizeAspectFill
+            playerLayer.videoGravity = videoGravity
+            playerLayers.append(playerLayer)
 
             let window = NSWindow(
                 contentRect: screen.frame,
@@ -308,7 +340,8 @@ final class WallpaperController: NSObject {
             // 데스크톱 그림(-2147483624) 위, 파인더 데스크톱(-2147483603) 아래
             window.level = NSWindow.Level(rawValue: -2147483610)
             window.isOpaque = false
-            window.backgroundColor = .clear
+            // contain 레터박스를 검정으로 렌더링한다(WALLPKG_SPEC §2 gravity: 남는 부분은 투명/검정).
+            window.backgroundColor = .black
             window.ignoresMouseEvents = true   // 클릭 완전 통과
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
             window.contentView = view
@@ -364,6 +397,8 @@ final class WallpaperController: NSObject {
                 self.sceneProcess = nil
                 self.emitReadiness(event: "failure", id: self.lastAppliedActive ?? executable.path, reason: "scene-exited-\\(process.terminationStatus)")
                 self.currentWebEntry = nil
+                self.packageGravity = "cover"   // raw 폴백 영상에는 wallpkg gravity 계약이 없다
+                self.activeGravityOverride = nil
                 self.buildWindows()
             }
         }
@@ -378,6 +413,11 @@ final class WallpaperController: NSObject {
         }
     }
 
+    private func applyVideoGravity() {
+        let gravity = videoGravity
+        playerLayers.forEach { $0.videoGravity = gravity }
+    }
+
     private func teardown() {
         readinessGeneration += 1
         if let child = sceneProcess {
@@ -390,6 +430,7 @@ final class WallpaperController: NSObject {
         readinessTimer = nil
         loopers.removeAll()
         players.forEach { $0.pause(); $0.removeAllItems() }
+        playerLayers.removeAll()
         setInteractive(false)
         webViews.forEach { $0.navigationDelegate = nil; $0.uiDelegate = nil; $0.stopLoading(); $0.removeFromSuperview() }
         webViews.removeAll()
