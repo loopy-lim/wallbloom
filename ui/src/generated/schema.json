@@ -1,0 +1,84 @@
+{
+  "packageId": "wallbloom.library",
+  "schemaVersion": 1,
+  "fieldOrder": "declaration",
+  "commands": [
+    {
+      "name": "scanLibrary",
+      "commandId": 1,
+      "inputType": "ScanLibraryInput",
+      "outputType": "Array_of_WallPackage",
+      "inputSchema": {
+        "title": "ScanLibraryInput",
+        "type": "object"
+      },
+      "outputSchema": {
+        "title": "Array_of_WallPackage",
+        "type": "array",
+        "items": {
+          "$ref": "#/definitions/WallPackage"
+        }
+      },
+      "execution": "sync",
+      "definitions": {
+        "WallPackage": {
+          "type": "object",
+          "required": [
+            "id",
+            "packageType",
+            "path",
+            "title"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "previewPath": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "packageType": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "events": [
+    {
+      "name": "download-progress",
+      "payload": {
+        "title": "DownloadProgress",
+        "type": "object",
+        "required": [
+          "receivedBytes"
+        ],
+        "properties": {
+          "receivedBytes": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "totalBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0.0
+          }
+        }
+      },
+      "definitions": {}
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "spec": 0.2,
+  "id": "reactive-shader",
+  "title": "Reactive Shader Test",
+  "type": "web",
+  "entry": "index.html",
+  "preview": "preview.png",
+  "loop": true,
+  "volume": 0.0,
+  "gravity": "cover",
+  "author": "Wallbloom acceptance fixture"
+}

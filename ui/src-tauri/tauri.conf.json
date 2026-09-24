@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Wallbloom",
+  "version": "0.1.0",
+  "identifier": "com.wallbloom.app",
+  "build": {
+    "beforeDevCommand": "npm run dev --prefix ..",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build --prefix ..",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{ "title": "Wallbloom", "width": 1000, "height": 700, "minWidth": 640, "minHeight": 480 }],
+    "security": {
+      "csp": null,
+      "capabilities": [{
+        "identifier": "main-events",
+        "description": "Allow the library WebView to receive download progress events",
+        "windows": ["main"],
+        "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+      }]
+    }
+  },
+  "bundle": { "active": true, "targets": "all" }
+}

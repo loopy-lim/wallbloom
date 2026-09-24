@@ -1,0 +1,9 @@
+{
+  "schema": "./src/generated/schema.json",
+  "output": "./src/generated",
+  "codegen": {
+    "rustManifest": "./src-tauri/Cargo.toml",
+    "rustBinary": "generate-contract"
+  },
+  "tauri": {}
+}

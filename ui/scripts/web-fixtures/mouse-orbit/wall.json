@@ -1,0 +1,9 @@
+{
+  "spec": 0.2,
+  "id": "mouse-orbit",
+  "title": "Mouse Orbit",
+  "type": "web",
+  "entry": "index.html",
+  "author": "Wallbloom",
+  "source": "Bundled interactive demo"
+}

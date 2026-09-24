@@ -1,0 +1,49 @@
+{
+  "root": "LibraryInfo",
+  "components": {
+    "LibraryInfo": {
+      "signature": "LibraryInfo(count: number, missingPreviews: number, title: string, path: string)",
+      "description": "Local wallpaper inventory and the last successfully selected package, not an AI recommendation."
+    }
+  },
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "LibraryInfo": {
+        "$ref": "#/$defs/LibraryInfo"
+      }
+    },
+    "required": [
+      "LibraryInfo"
+    ],
+    "additionalProperties": false,
+    "$defs": {
+      "LibraryInfo": {
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "number"
+          },
+          "missingPreviews": {
+            "type": "number"
+          },
+          "title": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "count",
+          "missingPreviews",
+          "title",
+          "path"
+        ],
+        "additionalProperties": false,
+        "description": "Local wallpaper inventory and the last successfully selected package, not an AI recommendation."
+      }
+    }
+  }
+}

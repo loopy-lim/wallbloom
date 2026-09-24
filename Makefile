@@ -3,11 +3,11 @@ BUNDLE_ID = dev.loopylim.wallbloom
 
 all: $(APP)
 
-$(APP): main.swift Info.plist Makefile
+$(APP): engine/main.swift Info.plist Makefile
 	@mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	swiftc -O \
 		-framework AppKit -framework AVFoundation \
-		main.swift -o $(APP)/Contents/MacOS/Wallbloom
+		engine/main.swift -o $(APP)/Contents/MacOS/Wallbloom
 	cp Info.plist $(APP)/Contents/Info.plist
 	touch $(APP)
 	@codesign --force --deep --sign - $(APP)
