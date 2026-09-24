@@ -128,3 +128,45 @@ rm -f "$HOME/Library/Application Support/Wallbloom/active.json"
 이전 active.json이 존재하는 경우 임포트 스크립트는 이를 증거 디렉터리의
 `active-before.json`으로 보존하고, `cp -p <증거경로>/active-before.json \\
 "$HOME/Library/Application Support/Wallbloom/active.json"`로 복원한다.
+
+## 최종 종결 수락 재실행 (2026-09-25)
+
+bridge 생성 스크립트를 `bunx --package @rustra/cli@0.11.3 rustra codegen
+--config rustra.json( --check)`으로 고정한 뒤(`check:bridge`, `generate:bridge`),
+`(cd ui && bun install && bun run check:bridge)`가 exit 0임을 확인했다.
+이어서 직렬 전체 수락을 재실행했다. 각 단계 종료 코드:
+
+| 단계 | 종료 코드 |
+|---|---:|
+| `make -B` | 0 |
+| `bun install --frozen-lockfile` | 0 |
+| `bun run check:bridge` | 0 |
+| `bun run test` | 0 |
+| `bun run build` | 0 |
+| `cargo test` / `cargo check` | 0 / 0 |
+| `verify-scene.sh` / `verify-registry.sh` / `verify-hotswap.sh` | 0 / 0 / 0 |
+| `verify-web.sh` / `verify-web-perf.sh` | 0 / 0 |
+| `verify-integrated.sh` | 0 |
+| `git diff --check` | 0 |
+
+`verify-integrated.sh`는 이번 실행에서 전체 PASS(종료 코드 0)였다. 초기
+가시화 1660.5 ms, 마우스 클릭 A→B 전환 PASS, 성능 단계 포함. 단 이는
+CGEvent로 OS에 게시한 신뢰(trusted) 합성 입력의 증거이지 물리 마우스 HITL이
+아니다. 물리 마우스 HITL, 저전력 HITL, 다중 Space, Unity/Unreal 실측은
+여전히 미수행이며 완료로 승격하지 않는다.
+
+웹 CPU 재측정(reactive shader 모드, 13 표본): CPU 평균/최대
+**14.262% / 89.900%**, RSS 평균/최대 **142.88 / 262.73 MiB** — CPU <10%
+목표 **FAIL**. 기록된 경량 기본 WebGL 모드 실측(13 표본, 13.531% / 93.300%,
+RSS 138.90 / 259.33 MiB)도 역시 FAIL로, 두 모드 모두 목표 미달이다.
+
+Wallbloom.app 번들 정책: `make -B` 재빌드 2회 연속에서 바이너리와
+Info.plist의 SHA-256이 각각 동일했다(결정론적 빌드·서명). 이전 루프의
+worktree dirty는 커밋된 번들이 구버전 소스로 빌드된 것이 원인이므로, 현재
+소스 기준으로 재생성된 번들을 커밋해 고정한다. 이후 `make -B`는 작업
+트리를 dirty하게 만들지 않는다. 빌드 산출물(`ui/dist/`, `ui/node_modules/`,
+`ui/src-tauri/target/`)은 `.gitignore`에 추가했다.
+
+주의: `verify-web-perf.sh`는 실행할 때마다 `MEASUREMENTS.md`에 새 실측
+섹션을 append한다. 수락 재실행 후에는 이 변경을 커밋하거나 복원해야
+`git status --porcelain`이 비어 있다.

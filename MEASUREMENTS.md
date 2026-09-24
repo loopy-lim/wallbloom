@@ -47,3 +47,9 @@
 환경: Apple M1 Max / 26.6.2 / 디스플레이 Resolution: 3456 x 2234 Retina; Resolution: 3456 x 2234; 측정 시작 2026-09-25T00:17:44+0900. 모델 식별자 `gpt-6-luna`, provider `openai-codex`. Web 재생 acceptance 증거 `/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T//wallbloom-web-evidence-vUFsfq`, 계측 증거 `/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T/wallbloom-web-perf-NyLpME`.
 
 격리 web-probe 및 자식 WebKit 콘텐츠/GPU/Networking 프로세스를 1초 간격으로 측정: 표본 **13**, CPU 평균/최대 **13.362% / 92.300%**, RSS 평균/최대 **143.89 / 259.20 MiB**. 목표 CPU <10%: **FAIL** (평균 기준). 프로세스 분해: `/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T/wallbloom-web-perf-NyLpME/summary.json`; 원시 표본: `/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T/wallbloom-web-perf-NyLpME/process-samples.jsonl`.
+
+## WebKit 엔진 트리 CPU/RAM 실측 (2026-09-25T00:36:08+0900)
+
+환경: Apple M1 Max / 26.6.2 / 디스플레이 Resolution: 3456 x 2234 Retina; Resolution: 3456 x 2234; 측정 시작 2026-09-25T00:36:08+0900. 모델 식별자 `glm-5.3-flash`, provider `zai`. Web 재생 acceptance 증거 `/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T//wallbloom-web-evidence-r42Bo9`, 계측 증거 `/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T/wallbloom-web-perf-ll6P9V`.
+
+격리 web-probe 및 자식 WebKit 콘텐츠/GPU/Networking 프로세스를 1초 간격으로 측정: 표본 **13**, CPU 평균/최대 **14.262% / 89.900%**, RSS 평균/최대 **142.88 / 262.73 MiB**. 목표 CPU <10%: **FAIL** (평균 기준). 프로세스 분해: `/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T/wallbloom-web-perf-ll6P9V/summary.json`; 원시 표본: `/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T/wallbloom-web-perf-ll6P9V/process-samples.jsonl`.
