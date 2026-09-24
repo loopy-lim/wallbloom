@@ -1,3 +1,6 @@
 Videowall.app/
 *.mp4
 .DS_Store
+ui/dist/
+ui/node_modules/
+ui/src-tauri/target/
