@@ -170,3 +170,34 @@ worktree dirty는 커밋된 번들이 구버전 소스로 빌드된 것이 원�
 주의: `verify-web-perf.sh`는 실행할 때마다 `MEASUREMENTS.md`에 새 실측
 섹션을 append한다. 수락 재실행 후에는 이 변경을 커밋하거나 복원해야
 `git status --porcelain`이 비어 있다.
+
+## 최종 커밋 전 직렬 회귀 재확인 (2026-09-25)
+
+gravity 커밋(f67a2c3) 이후 완료 커밋을 위해 완료 검사 체인을 그대로
+재실행했다. 모델 식별자 `glm-5.3-flash`, provider `zai`(환경 식별이며
+라우팅 증명 아님). 각 단계 종료 코드:
+
+| 단계 | 종료 코드 |
+|---|---:|
+| `make -B` | 0 |
+| `bun install` | 0 |
+| `bun run check:bridge` | 0 |
+| `bun run test` | 0 (12/12) |
+| `bun run build` | 0 |
+| `cargo test` / `cargo check` | 0 (22/22) / 0 |
+| `verify-gravity.sh` | 0 |
+| `verify-hotswap.sh` | 2 → 재실행 0 |
+| `verify-web.sh` | 0 |
+| `verify-integrated.sh` | 0 |
+| `git diff --check` | 0 |
+| 완료 검사 && 체인 전체 | 0 |
+
+`verify-hotswap.sh` 1차 실행은 fixture-b(파랑) 선택 직후 캡처가 윈도우
+재생성 직전의 빨강 프레임(RGB 254/0/0)을 담아 exit 2였다. 엔진 ack는 3회
+전환 모두 238/589/333 ms로 3초 이내였고 재실행은 exit 0이므로 캡처 경주
+(flake)로 판정한다. 재생성된 `Wallbloom.app`는 `git checkout --
+Wallbloom.app`으로 커밋된 번들로 복원했다(결정론적 빌드 정책 유지).
+
+미증명 항목은 이번에도 완료로 승격하지 않는다: 물리 마우스 HITL, 저전력
+HITL, 다중 Space, Web CPU <10% 목표(MEASUREMENTS 최신 14.771% 평균 FAIL),
+Unity/Unreal 실측(필수 설치물 부재), Windows M4.
