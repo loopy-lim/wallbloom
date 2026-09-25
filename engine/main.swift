@@ -9,6 +9,8 @@
 import AppKit
 import AVFoundation
 import WebKit
+import IOKit.ps
+import ServiceManagement
 
 /// 기본 영상 후보 (순서대로 존재 확인)
 let DEFAULT_VIDEO_CANDIDATES = [
@@ -48,9 +50,11 @@ func normalizeGravity(_ raw: String?) -> String {
 final class WebPackage {
     let root: URL
     let entry: URL
+    let powerPolicy: String
     static let policy = "default-src 'none'; script-src file: 'unsafe-inline'; style-src file: 'unsafe-inline'; img-src file: data:; font-src file:; media-src file:; connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'"
 
-    init(directory: URL, entry sourceEntry: URL) throws {
+    init(directory: URL, entry sourceEntry: URL, powerPolicy: String = "auto") throws {
+        self.powerPolicy = powerPolicy == "alwaysActive" ? "alwaysActive" : "auto"
         let fm = FileManager.default
         let sourceRoot = directory.resolvingSymlinksInPath().standardizedFileURL
         root = fm.temporaryDirectory.resolvingSymlinksInPath().standardizedFileURL
@@ -110,6 +114,11 @@ final class WallpaperController: NSObject {
     private var globalEscapeMonitor: Any?
     private var pauseAttentionEmitted = false
     private var webViews: [WKWebView] = []
+    private var webSnapshots: [ObjectIdentifier: NSImageView] = [:]
+    private var webSnapshotPending = Set<ObjectIdentifier>()
+    private var batteryTimer: Timer?
+    private var coverageTimer: Timer?
+    private var isOnBattery = false
     private var loadedWebViews: Set<ObjectIdentifier> = []
     private var isInteractive = false
     private var escapeMonitor: Any?
@@ -120,9 +129,8 @@ final class WallpaperController: NSObject {
     // 화면 맞춤 모드: wallpkg gravity 기본값 + active.json 오버라이드(모두 정규화됨).
     private var packageGravity = "cover"
     private var activeGravityOverride: String?
-    private var statusItem: NSStatusItem?
     private var lowPowerObserver: NSKeyValueObservation?
-    private var isPausedByUser = false
+    private(set) var isPausedByUser = false
     private var isPausedByContract = false
     private var activeJSONPath: URL {
         if let isolatedRoot = ProcessInfo.processInfo.environment["WALLBLOOM_SUPPORT_DIR"] {
@@ -162,7 +170,6 @@ final class WallpaperController: NSObject {
             currentVideo = URL(fileURLWithPath: CommandLine.arguments[1])
             buildWindows()
         }
-        setupMenuBar()
         setupObservers()
         pollActiveJSON()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { [weak self] _ in
@@ -200,8 +207,9 @@ final class WallpaperController: NSObject {
                     let entryURL = try validateWallpkg(packageURL)
                     let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: packageURL.appendingPathComponent("wall.json"))) as? [String: Any]
                     // Validate/copy before destroying the last working wallpaper.
+                    let rawPolicy = manifest?["powerPolicy"] as? String
                     let preparedWeb = manifest?["type"] as? String == "web"
-                        ? try WebPackage(directory: packageURL, entry: entryURL) : nil
+                        ? try WebPackage(directory: packageURL, entry: entryURL, powerPolicy: rawPolicy == "alwaysActive" ? "alwaysActive" : "auto") : nil
                     let sceneConfig = manifest?["type"] as? String == "scene" ? manifest?["scene"] as? [String: Any] : nil
                     lastAppliedActive = state.active
                     isPausedByContract = state.paused
@@ -452,47 +460,6 @@ final class WallpaperController: NSObject {
         print("WALLBLOOM_APPLY \(line)")
     }
 
-    // MARK: 메뉴바
-
-    private func setupMenuBar() {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "🎬"
-
-        let menu = NSMenu()
-        let pause = NSMenuItem(
-            title: "일시정지",
-            action: #selector(togglePause),
-            keyEquivalent: ""
-        )
-        pause.target = self
-        menu.addItem(pause)
-        let interaction = NSMenuItem(title: "웹 배경 상호작용 시작", action: #selector(toggleInteraction), keyEquivalent: "")
-        interaction.target = self
-        menu.addItem(interaction)
-        let sceneInteraction = NSMenuItem(title: "씬 상호작용 시작", action: #selector(toggleSceneInteraction), keyEquivalent: "")
-        sceneInteraction.target = self
-        menu.addItem(sceneInteraction)
-
-        let open = NSMenuItem(
-            title: "영상 열기…",
-            action: #selector(openVideo),
-            keyEquivalent: "o"
-        )
-        open.target = self
-        menu.addItem(open)
-
-        menu.addItem(.separator())
-        let quit = NSMenuItem(
-            title: "Wallbloom 종료",
-            action: #selector(NSApplication.terminate(_:)),
-            keyEquivalent: "q"
-        )
-        menu.addItem(quit)
-
-        item.menu = menu
-        statusItem = item
-    }
-
     // MARK: 관찰자 (저전력 모드 / 디스플레이 변경)
 
     private func setupObservers() {
@@ -516,6 +483,22 @@ final class WallpaperController: NSObject {
                 self.buildWindows()
             }
         }
+        batteryTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let source = IOPSCopyPowerSourcesInfo().takeRetainedValue()
+            let list = IOPSCopyPowerSourcesList(source).takeRetainedValue() as Array
+            self.isOnBattery = list.contains { ref in
+                guard let d = IOPSGetPowerSourceDescription(source, ref)?.takeUnretainedValue() as? [String: Any] else { return false }
+                return d[kIOPSPowerSourceStateKey] as? String == kIOPSBatteryPowerValue
+            }
+            self.applyPlaybackState()
+        }
+        batteryTimer?.fire()
+        coverageTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self, self.webPackage?.powerPolicy != "alwaysActive" else { return }
+            self.applyPlaybackState()
+        }
+        NotificationCenter.default.addObserver(forName: Notification.Name("NSProcessInfoPowerStateDidChange"), object: nil, queue: .main) { [weak self] _ in self?.applyPlaybackState() }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             self?.setInteractive(false)
         }
@@ -529,9 +512,14 @@ final class WallpaperController: NSObject {
             if shouldPlay && sceneSuspended { sceneProcess.resume(); sceneSuspended = false }
             else if !shouldPlay && !sceneSuspended { sceneProcess.suspend(); sceneSuspended = true }
         }
-        webViews.forEach { webView in
-            webView.setAllMediaPlaybackSuspended(!shouldPlay, completionHandler: nil)
-            let hook = shouldPlay ? "resume" : "pause"
+        let autoWeb = webPackage?.powerPolicy != "alwaysActive"
+        let snapshotMode = autoWeb && !isInteractive && (lowPower || isCoveredByWindow)
+        for webView in webViews {
+            if snapshotMode { detachWebViewWithSnapshot(webView) } else { restoreWebView(webView) }
+            let throttled = autoWeb && !isInteractive && isOnBattery && !snapshotMode
+            webView.evaluateJavaScript("window.wallbloom && window.wallbloom.setFrameRate && window.wallbloom.setFrameRate(\(throttled ? 1 : 0))")
+            webView.setAllMediaPlaybackSuspended(!shouldPlay || snapshotMode, completionHandler: nil)
+            let hook = shouldPlay && !snapshotMode ? "resume" : "pause"
             webView.evaluateJavaScript("window.wallbloom && typeof window.wallbloom.\(hook) === 'function' ? window.wallbloom.\(hook)() : undefined")
         }
         if !shouldPlay && !webViews.isEmpty {
@@ -541,7 +529,46 @@ final class WallpaperController: NSObject {
                 pauseAttentionEmitted = true
             }
         } else { pauseAttentionEmitted = false }
-        statusItem?.menu?.items.first?.title = isPausedByUser ? "재생" : "일시정지"
+    }
+
+    private var isCoveredByWindow: Bool {
+        let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        return NSScreen.screens.contains { screen in
+            info.contains { item in
+                guard let number = item[kCGWindowNumber as String] as? Int,
+                      (item[kCGWindowOwnerPID as String] as? pid_t) != ProcessInfo.processInfo.processIdentifier,
+                      let layer = item[kCGWindowLayer as String] as? Int,
+                      layer == 0,
+                      let bounds = item[kCGWindowBounds as String] as? [String: CGFloat],
+                      let x = bounds["X"], let y = bounds["Y"], let w = bounds["Width"], let h = bounds["Height"] else { return false }
+                if windows.contains(where: { $0.windowNumber == number }) { return false }
+                let rect = CGRect(x: x, y: NSScreen.screens.map { $0.frame.maxY }.max().map { $0 - y - h } ?? y, width: w, height: h)
+                return rect.contains(screen.frame)
+            }
+        }
+    }
+
+    private func detachWebViewWithSnapshot(_ webView: WKWebView) {
+        let key = ObjectIdentifier(webView)
+        guard loadedWebViews.contains(key), webSnapshots[key] == nil, !webSnapshotPending.contains(key), let window = webView.window else { return }
+        webSnapshotPending.insert(key)
+        webView.takeSnapshot(with: nil) { [weak self, weak webView] image, _ in
+            guard let self, let webView, let image else { self?.webSnapshotPending.remove(key); return }
+            self.webSnapshotPending.remove(key)
+            guard self.webPackage?.powerPolicy != "alwaysActive", !self.isInteractive else { return }
+            let imageView = NSImageView(frame: webView.frame)
+            imageView.image = image
+            imageView.imageScaling = .scaleAxesIndependently
+            window.contentView = imageView
+            self.webSnapshots[key] = imageView
+        }
+    }
+
+    private func restoreWebView(_ webView: WKWebView) {
+        let key = ObjectIdentifier(webView)
+        guard let snapshot = webSnapshots.removeValue(forKey: key), let window = windows.first(where: { $0.contentView === snapshot }) else { return }
+        window.contentView = webView
+        webView.setNeedsDisplay(webView.bounds)
     }
 
     // MARK: 액션
@@ -577,7 +604,15 @@ final class WallpaperController: NSObject {
             config.preferences.javaScriptCanOpenWindowsAutomatically = false
             config.websiteDataStore = .nonPersistent()
             config.userContentController.add(rules)
-            let pauseHook = WKUserScript(source: "window.wallbloom = window.wallbloom || {};", injectionTime: .atDocumentStart, forMainFrameOnly: true)
+            config.preferences.inactiveSchedulingPolicy = .suspend
+            let rawPolicy = webPackage?.powerPolicy ?? "auto"
+            let policyJSON = (try? JSONSerialization.data(withJSONObject: [rawPolicy])).flatMap { String(data: $0, encoding: .utf8) } ?? "[\"auto\"]"
+            let policyLiteral = String(policyJSON.dropFirst().dropLast())
+            let pauseHook = WKUserScript(source: """
+                window.wallbloom = window.wallbloom || {};
+                window.wallbloom.powerPolicy = \(policyLiteral);
+                (()=>{const raf=requestAnimationFrame.bind(window),caf=cancelAnimationFrame.bind(window);let rate=0,timer=null,id=0,callback=null;window.wallbloom.setFrameRate=n=>{rate=n;if(!n&&timer){clearTimeout(timer);timer=null;if(callback){const f=callback;callback=null;raf(f)}}};window.requestAnimationFrame=cb=>{if(!rate)return raf(cb);callback=cb;if(!timer)timer=setTimeout(()=>{timer=null;id=raf(t=>{const f=callback;callback=null;if(f)f(t)})},1000/rate);return id};window.cancelAnimationFrame=n=>{if(n===id){caf(id);callback=null}}})();
+                """, injectionTime: .atDocumentStart, forMainFrameOnly: true)
             config.userContentController.addUserScript(pauseHook)
             config.mediaTypesRequiringUserActionForPlayback = .all
             let web = WKWebView(frame: NSRect(origin: .zero, size: screen.frame.size), configuration: config)
@@ -612,7 +647,6 @@ final class WallpaperController: NSObject {
                 launchScene(entry)
             } catch { fputs("Wallbloom: scene interaction restart failed: \\(error)\\n", stderr) }
         }
-        statusItem?.menu?.items.first(where: { $0.action == #selector(toggleSceneInteraction) })?.title = sceneInteractive ? "씬 상호작용 종료" : "씬 상호작용 시작"
     }
 
     private func setInteractive(_ enabled: Bool) {
@@ -650,17 +684,45 @@ final class WallpaperController: NSObject {
                 previousApplication = nil
             }
         }
-        if let item = statusItem?.menu?.items.first(where: { $0.action == #selector(toggleInteraction) }) {
-            item.title = isInteractive ? "웹 상호작용 종료 (Escape)" : "웹 배경 상호작용 시작"
-        }
+        if wasInteractive != isInteractive { DispatchQueue.main.async { self.applyPlaybackState() } }
     }
 
-    @objc private func togglePause() {
+    @objc func togglePause() {
         isPausedByUser.toggle()
         applyPlaybackState()
     }
 
-    @objc private func openVideo() {
+    /// 조작 창 표시용: 현재 재생 중인 영상 파일명
+    var currentVideoName: String { currentVideo.lastPathComponent }
+
+    /// 조작 창 표시용: 현재 적용 중인 화면 맞춤 모드(cover/contain/stretch)
+    var currentGravity: String { effectiveGravity }
+
+    /// 조작 창의 화면 맞춤 모드 선택을 active.json contract의 gravity 필드에 반영한다.
+    /// 기존 watcher(pollActiveJSON)가 파일 변경을 감지해 재생 재시작 없이 videoGravity만 갱신한다.
+    /// gravity는 normalizeGravity로 검증된다(cover/contain/stretch 외 무시 → cover).
+    func setGravity(_ gravity: String) {
+        let value = normalizeGravity(gravity)
+        guard value != effectiveGravity else { return }
+        // 기존 파일의 다른 키(active/paused/spec 등)를 보존하고 gravity만 교체한다.
+        var object: [String: Any] = [
+            "spec": 0.2,
+            "active": lastAppliedActive ?? currentVideo.path,
+            "paused": isPausedByContract,
+        ]
+        if let data = try? Data(contentsOf: activeJSONPath),
+           let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            object = existing
+        }
+        object["gravity"] = value
+        guard let out = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
+              (try? out.write(to: activeJSONPath, options: .atomic)) != nil else {
+            fputs("Wallbloom: active.json gravity 쓰기 실패\n", stderr)
+            return
+        }
+    }
+
+    func openVideo() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
@@ -718,8 +780,16 @@ enum ActiveJSONError: Error {
     case invalid
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     var controller: WallpaperController!
+    private var controlWindow: NSWindow?
+    private weak var videoNameLabel: NSTextField?
+    private weak var pauseButton: NSButton?
+    private weak var gravityPopup: NSPopUpButton?
+    private weak var loginButton: NSButton?
+    private weak var dockSwitch: NSSwitch?
+    private weak var menuBarSwitch: NSSwitch?
+    private var statusItem: NSStatusItem?
 
     func applicationWillTerminate(_ notification: Notification) { controller?.stop() }
 
@@ -729,6 +799,244 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             : resolveDefaultVideo()
         controller = WallpaperController(video: video)
         controller.start()
+        applyIconSettings()
+    }
+
+    // MARK: Dock / 메뉴바 아이콘 (UserDefaults: showDockIcon / showMenuBarIcon)
+
+    /// 저장된 설정으로 두 아이콘 상태를 적용한다. 기본값은 둘 다 숨김(register로 등록).
+    private func applyIconSettings() {
+        let defaults = UserDefaults.standard
+        defaults.register(defaults: ["showDockIcon": false, "showMenuBarIcon": false])
+        let showDock = defaults.bool(forKey: "showDockIcon")
+        let showMenuBar = defaults.bool(forKey: "showMenuBarIcon")
+        // register는 휘발성이라 `defaults read`로 기본 숨김(false)이 보이도록 영구 도메인에도 기록한다.
+        defaults.set(showDock, forKey: "showDockIcon")
+        defaults.set(showMenuBar, forKey: "showMenuBarIcon")
+        NSApp.setActivationPolicy(showDock ? .regular : .accessory)
+        if showMenuBar { installStatusItem() } else { removeStatusItem() }
+    }
+
+    /// 메뉴바 아이콘 생성: 일시정지/재개, 영상 교체…, Wallbloom 끄기
+    private func installStatusItem() {
+        guard statusItem == nil else { return }
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.button?.image = NSImage(systemSymbolName: "photo.on.rectangle.angled", accessibilityDescription: "Wallbloom")
+        let menu = NSMenu()
+        menu.delegate = self
+        item.menu = menu
+        statusItem = item
+    }
+
+    /// 메뉴바 아이콘 제거: 인스턴스를 놓아주면 시스템 메뉴바에서 사라진다.
+    private func removeStatusItem() {
+        statusItem?.isVisible = false
+        statusItem?.menu = nil
+        statusItem = nil
+    }
+
+    /// 상태 메뉴를 열 때마다 일시정지 상태를 반영해 다시 만든다.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let paused = controller?.isPausedByUser ?? false
+        let pause = NSMenuItem(title: paused ? "재개" : "일시정지", action: #selector(controlPauseClicked), keyEquivalent: "")
+        pause.target = self
+        menu.addItem(pause)
+        let replace = NSMenuItem(title: "영상 교체…", action: #selector(controlReplaceClicked), keyEquivalent: "")
+        replace.target = self
+        menu.addItem(replace)
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: "Wallbloom 끄기", action: #selector(controlQuitClicked), keyEquivalent: "")
+        quit.target = self
+        menu.addItem(quit)
+    }
+
+    /// Dock 아이콘 표시 시 Dock 메뉴(일시정지/재개, 끄기)를 함께 복원한다.
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        guard UserDefaults.standard.bool(forKey: "showDockIcon") else { return nil }
+        let menu = NSMenu()
+        let paused = controller?.isPausedByUser ?? false
+        let pause = NSMenuItem(title: paused ? "재개" : "일시정지", action: #selector(controlPauseClicked), keyEquivalent: "")
+        pause.target = self
+        menu.addItem(pause)
+        let quit = NSMenuItem(title: "Wallbloom 끄기", action: #selector(controlQuitClicked), keyEquivalent: "")
+        quit.target = self
+        menu.addItem(quit)
+        return menu
+    }
+
+    // MARK: 설정 창 (앱 재실행 reopen 시 표시)
+
+    /// 실행 중인 앱을 다시 실행하면 설정 창을 띄운다. 항상 true를 반환해 reopen을 소비한다.
+    /// 배경화면 윈도우(데스크톱 레벨, 항상 on-screen)가 flag를 true로 만들므로
+    /// 사용자가 조작할 수 있는 창(controlWindow) 기준으로 판단한다.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag || controlWindow?.isVisible != true { showControlWindow() }
+        return true
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        if controlWindow?.isVisible != true { showControlWindow() }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        // 설정 창을 닫아도 앱은 배경화면을 계속 재생한다. nil로 정리해 다음 reopen에서 다시 뜬다.
+        if (notification.object as? NSWindow) === controlWindow { controlWindow = nil }
+    }
+
+    private func showControlWindow() {
+        guard let controller = controller else { return }
+        let window = controlWindow ?? makeControlWindow()
+        controlWindow = window
+        videoNameLabel?.stringValue = "재생 중: \(controller.currentVideoName)"
+        refreshPauseButton()
+        refreshSettingsControls()
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func makeControlWindow() -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 296),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Wallbloom 설정"
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.center()
+
+        let label = NSTextField(labelWithString: "")
+        label.font = .systemFont(ofSize: 13)
+        label.lineBreakMode = .byTruncatingMiddle
+
+        // 화면 맞춤 모드: active.json contract의 gravity 필드(cover/contain/stretch)에 반영
+        let gravityLabel = NSTextField(labelWithString: "화면 맞춤:")
+        let gravity = NSPopUpButton(frame: .zero, pullsDown: false)
+        gravity.addItems(withTitles: ["cover", "contain", "stretch"])
+        gravity.target = self
+        gravity.action = #selector(controlGravityChanged(_:))
+
+ // 로그인 시 시작: SMAppService(macOS 13+)
+        let login = NSButton(checkboxWithTitle: "로그인 시 시작", target: self, action: #selector(controlLoginToggled(_:)))
+
+        // Dock / 메뉴바 아이콘 토글: UserDefaults에 저장, 런타임 즉시 적용
+        let dockLabel = NSTextField(labelWithString: "Dock에 아이콘 표시")
+        let dock = NSSwitch()
+        dock.target = self
+        dock.action = #selector(controlDockToggled(_:))
+        let menuBarLabel = NSTextField(labelWithString: "메뉴바에 아이콘 표시")
+        let menuBar = NSSwitch()
+        menuBar.target = self
+        menuBar.action = #selector(controlMenuBarToggled(_:))
+
+        let pause = NSButton(title: "일시정지", target: self, action: #selector(controlPauseClicked))
+        let replace = NSButton(title: "영상 교체…", target: self, action: #selector(controlReplaceClicked))
+        let quit = NSButton(title: "Wallbloom 끄기", target: self, action: #selector(controlQuitClicked))
+        let buttons = [pause, replace, quit]
+        for view in [label, gravityLabel, gravity, login, dock, dockLabel, menuBar, menuBarLabel] + buttons {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            window.contentView!.addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 20),
+            label.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 20),
+            label.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -20),
+
+            gravityLabel.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 16),
+            gravityLabel.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 20),
+            gravity.leadingAnchor.constraint(equalTo: gravityLabel.trailingAnchor, constant: 8),
+            gravity.centerYAnchor.constraint(equalTo: gravityLabel.centerYAnchor),
+            gravity.widthAnchor.constraint(equalToConstant: 120),
+            gravity.trailingAnchor.constraint(lessThanOrEqualTo: window.contentView!.trailingAnchor, constant: -20),
+
+            login.topAnchor.constraint(equalTo: gravityLabel.bottomAnchor, constant: 16),
+            login.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 20),
+
+            dock.topAnchor.constraint(equalTo: login.bottomAnchor, constant: 16),
+            dock.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 20),
+            dockLabel.centerYAnchor.constraint(equalTo: dock.centerYAnchor),
+            dockLabel.leadingAnchor.constraint(equalTo: dock.trailingAnchor, constant: 8),
+
+            menuBar.topAnchor.constraint(equalTo: dock.bottomAnchor, constant: 12),
+            menuBar.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 20),
+            menuBarLabel.centerYAnchor.constraint(equalTo: menuBar.centerYAnchor),
+            menuBarLabel.leadingAnchor.constraint(equalTo: menuBar.trailingAnchor, constant: 8),
+        ] + buttons.flatMap { button in
+            [
+                button.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 20),
+                button.widthAnchor.constraint(equalToConstant: 140),
+            ]
+        } + [
+            pause.topAnchor.constraint(equalTo: menuBar.bottomAnchor, constant: 16),
+            replace.topAnchor.constraint(equalTo: pause.bottomAnchor, constant: 10),
+            quit.topAnchor.constraint(equalTo: replace.bottomAnchor, constant: 10),
+            quit.bottomAnchor.constraint(equalTo: window.contentView!.bottomAnchor, constant: -16),
+        ])
+        videoNameLabel = label
+        pauseButton = pause
+        gravityPopup = gravity
+        loginButton = login
+        dockSwitch = dock
+        menuBarSwitch = menuBar
+        return window
+    }
+
+    private func refreshPauseButton() {
+        guard let controller = controller else { return }
+        pauseButton?.title = controller.isPausedByUser ? "재개" : "일시정지"
+    }
+
+    private func refreshSettingsControls() {
+        guard let controller = controller else { return }
+        gravityPopup?.selectItem(withTitle: controller.currentGravity)
+        loginButton?.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        dockSwitch?.state = UserDefaults.standard.bool(forKey: "showDockIcon") ? .on : .off
+        menuBarSwitch?.state = UserDefaults.standard.bool(forKey: "showMenuBarIcon") ? .on : .off
+    }
+
+    @objc private func controlGravityChanged(_ sender: NSPopUpButton) {
+        controller?.setGravity(sender.titleOfSelectedItem ?? "cover")
+    }
+
+    @objc private func controlDockToggled(_ sender: NSSwitch) {
+        let show = sender.state == .on
+        UserDefaults.standard.set(show, forKey: "showDockIcon")
+        NSApp.setActivationPolicy(show ? .regular : .accessory)
+    }
+
+    @objc private func controlMenuBarToggled(_ sender: NSSwitch) {
+        let show = sender.state == .on
+        UserDefaults.standard.set(show, forKey: "showMenuBarIcon")
+        if show { installStatusItem() } else { removeStatusItem() }
+    }
+
+    @objc private func controlLoginToggled(_ sender: NSButton) {
+        do {
+            if sender.state == .on {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            fputs("Wallbloom: 로그인 시 시작 설정 실패: \(error)\n", stderr)
+            sender.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        }
+    }
+
+    @objc private func controlPauseClicked() {
+        controller?.togglePause()
+        refreshPauseButton()
+    }
+
+    @objc private func controlReplaceClicked() {
+        controller?.openVideo()
+        videoNameLabel?.stringValue = "재생 중: \(controller?.currentVideoName ?? "-")"
+    }
+
+    @objc private func controlQuitClicked() {
+        NSApp.terminate(nil)
     }
 }
 
@@ -736,5 +1044,7 @@ setbuf(stdout, nil)  // 리다이렉트 시에도 즉시 로그 출력
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
-app.setActivationPolicy(.accessory)  // Dock 아이콘 없이 실행
+// LSUIElement(Info.plist) 기본 정책: Dock·cmd-Tab에서 숨김. launch 후 applyIconSettings가
+// UserDefaults(showDockIcon/showMenuBarIcon) 저장값으로 두 아이콘 상태를 다시 적용한다.
+app.setActivationPolicy(.accessory)
 app.run()

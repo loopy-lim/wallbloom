@@ -38,6 +38,10 @@ func capture(_ window: NSWindow, to url: URL) -> NSBitmapImageRep? {
     guard let data = try? Data(contentsOf: url) else { return nil }
     return NSBitmapImageRep(data: data)
 }
+func markPerf(_ name: String, evidence: URL) {
+    let path = ProcessInfo.processInfo.environment["WALLBLOOM_PERF_PHASE_FILE"] ?? evidence.appendingPathComponent("perf-phase").path
+    try? Data(name.utf8).write(to: URL(fileURLWithPath: path), options: .atomic)
+}
 func pixel(_ image: NSBitmapImageRep?) -> NSColor? {
     guard let image else { return nil }
     return image.colorAt(x: image.pixelsWide / 2, y: image.pixelsHigh / 2)?.usingColorSpace(.deviceRGB)
@@ -85,6 +89,8 @@ extension WallpaperController {
         guard let web = webViews.first, let window = windows.first else { return }
         check(windows.allSatisfy { $0.ignoresMouseEvents }, "default click-through policy")
         check(js(web, "!!window.wallbloomFixture") as? Bool == true, "real WebKit executes local JS")
+        check(js(web, "window.wallbloom.powerPolicy") as? String == "auto", "missing powerPolicy defaults to auto")
+        check(js(web, "typeof window.wallbloom.setFrameRate === 'function'") as? Bool == true, "engine injects frame-rate control")
         let frames = js(web, "window.wallbloomFixture.frames") as? Int ?? 0
         pump(0.5)
         check((js(web, "window.wallbloomFixture.frames") as? Int ?? 0) > frames, "real WebGL animation advances")
@@ -92,6 +98,7 @@ extension WallpaperController {
         check(js(web, "document.querySelector('#status').textContent.startsWith('WEBGL OK')") as? Bool == true, "WebGL shader compiles and draws")
         // The fixture itself must NOT supply this policy. Removing engine enforcement must fail this assertion.
         check(js(web, "Array.from(document.querySelectorAll('meta[http-equiv]')).some(m => m.content.includes(\"worker-src 'none'\"))") as? Bool == true, "engine supplies restrictive CSP")
+        markPerf("normal-live", evidence: evidence)
         let a = pixel(capture(window, to: evidence.appendingPathComponent("web-a.png")))
         check(a != nil && (a?.blueComponent ?? 0) > 0.3, "WebGL pixels visible in actual window capture")
         let outsidePath = String(data: (try? JSONSerialization.data(withJSONObject: [outside.absoluteString])) ?? Data(), encoding: .utf8) ?? "[]"
@@ -161,6 +168,33 @@ extension WallpaperController {
         setInteractive(false)
         check(windows.allSatisfy { $0.ignoresMouseEvents && $0.level.rawValue == -2147483610 }, "exit restores desktop click-through")
         check(!NSApp.isHidden, "exit does not hide wallpaper windows")
+        markPerf("battery-1fps", evidence: evidence)
+        isOnBattery = true
+        applyPlaybackState()
+        let batteryFrames = js(web, "wallbloomFixture.frames") as? Int ?? 0
+        pump(3.2)
+        let throttledFrames = js(web, "wallbloomFixture.frames") as? Int ?? 0
+        check((1...5).contains(throttledFrames - batteryFrames), "battery simulation limits WebKit to approximately 1fps")
+        markPerf("normal-restore", evidence: evidence)
+        isOnBattery = false
+        applyPlaybackState()
+        pump(0.3)
+        let resumedFrames = js(web, "wallbloomFixture.frames") as? Int ?? 0
+        check(resumedFrames > throttledFrames, "power restore resumes normal WebKit frames")
+        let attachedPixel = pixel(capture(window, to: evidence.appendingPathComponent("snapshot-before.png")))
+        markPerf("snapshot-detached", evidence: evidence)
+        detachWebViewWithSnapshot(web)
+        pump(1.2)
+        let snapshotFrames = js(web, "wallbloomFixture.frames") as? Int ?? 0
+        pump(0.3)
+        let stableSnapshotFrames = js(web, "wallbloomFixture.frames") as? Int ?? -1
+        check(webSnapshots[ObjectIdentifier(web)] != nil && stableSnapshotFrames == snapshotFrames, "snapshot detaches WebView and freezes frame counter")
+        let snapshotPixel = pixel(capture(window, to: evidence.appendingPathComponent("snapshot-during.png")))
+        check(attachedPixel != nil && snapshotPixel != nil && abs((attachedPixel?.redComponent ?? 0) - (snapshotPixel?.redComponent ?? 1)) < 0.08, "snapshot preserves visible pixels")
+        markPerf("snapshot-restore", evidence: evidence)
+        restoreWebView(web)
+        pump(0.5)
+        check((js(web, "wallbloomFixture.frames") as? Int ?? 0) > snapshotFrames, "reattachment resumes frame counter")
         // The fixture opts into the cooperative pause contract and owns its timer.
         let liveTicks = js(web, "window.wallbloomFixture.timerTicks") as? Int ?? 0
         pump(0.2)

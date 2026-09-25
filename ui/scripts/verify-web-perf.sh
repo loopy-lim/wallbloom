@@ -23,6 +23,8 @@ with open(out,'w', buffering=1) as f:
                 try: procs[int(p[0])]={'ppid':int(p[1]),'cpu':float(p[2]),'rss_kib':int(p[3]),'command':p[4]}
                 except ValueError: pass
         roots=[pid for pid,v in procs.items() if 'web-probe' in v['command'] and '/wallbloom-web-evidence-' in v['command']]
+        try: phase=open(sys.argv[1]+'/perf-phase').read().strip()
+        except OSError: phase='unmarked'
         if roots:
             tracked=set(roots)
             changed=True
@@ -34,7 +36,7 @@ with open(out,'w', buffering=1) as f:
             for pid in sorted(tracked):
                 if pid in procs:
                     v=procs[pid]; members.append(dict(pid=pid,cpu_percent=v['cpu'],rss_kib=v['rss_kib'],command=v['command']))
-            f.write(json.dumps({'time':time.time(),'processes':members})+'\n')
+            f.write(json.dumps({'time':time.time(),'phase':phase,'processes':members})+'\n')
         time.sleep(1)
 PY
 python3 "$evidence/sampler.py" "$evidence" &
@@ -42,7 +44,7 @@ sampler_pid=$!
 finish_sampler() { kill "$sampler_pid" 2>/dev/null || true; wait "$sampler_pid" 2>/dev/null || true; }
 trap finish_sampler EXIT
 set +e
-bash "$root/ui/scripts/verify-web.sh" >"$evidence/web-acceptance.log" 2>&1
+WALLBLOOM_PERF_PHASE_FILE="$evidence/perf-phase" bash "$root/ui/scripts/verify-web.sh" >"$evidence/web-acceptance.log" 2>&1
 web_exit=$?
 set -e
 finish_sampler
@@ -61,19 +63,27 @@ for line in open(sys.argv[1]):
 if snapshots:
     cpu=[sum(p['cpu_percent'] for p in x['processes']) for x in snapshots]
     rss=[sum(p['rss_kib'] for p in x['processes'])/1024 for x in snapshots]
+    phases={}
+    for x in snapshots:
+        phase=phases.setdefault(x.get('phase','unmarked'),{'samples':0,'cpu_sum':0,'rss_sum':0,'cpu_max_percent':0,'rss_max_mib':0})
+        c=sum(p['cpu_percent'] for p in x['processes']); r=sum(p['rss_kib'] for p in x['processes'])/1024
+        phase['samples']+=1; phase['cpu_sum']+=c; phase['rss_sum']+=r
+        phase['cpu_max_percent']=max(phase['cpu_max_percent'],c); phase['rss_max_mib']=max(phase['rss_max_mib'],r)
+    for phase in phases.values():
+        phase['cpu_average_percent']=phase.pop('cpu_sum')/phase['samples']; phase['rss_average_mib']=phase.pop('rss_sum')/phase['samples']
     by={}
     for x in snapshots:
         for p in x['processes']:
             name=p['command'].rsplit('/',1)[-1]
             a=by.setdefault(name,{'samples':0,'cpu_percent_sum':0,'rss_mib_sum':0})
             a['samples']+=1; a['cpu_percent_sum']+=p['cpu_percent']; a['rss_mib_sum']+=p['rss_kib']/1024
-    result={'samples':len(snapshots),'cpu_average_percent':sum(cpu)/len(cpu),'cpu_max_percent':max(cpu),'rss_average_mib':sum(rss)/len(rss),'rss_max_mib':max(rss),'process_breakdown':by}
+    result={'samples':len(snapshots),'cpu_average_percent':sum(cpu)/len(cpu),'cpu_max_percent':max(cpu),'rss_average_mib':sum(rss)/len(rss),'rss_max_mib':max(rss),'process_breakdown':by,'phase_measurements':phases}
 else: result={'samples':0,'reason':'isolated web-probe process tree was not observed during sampling'}
 json.dump(result,open(sys.argv[2],'w'),indent=2)
 PY
-python3 - "$evidence" "$web_exit" "$web_evidence" "$model" "$provider" "$start" "$root/MEASUREMENTS.md" <<'PY'
+python3 - "$evidence" "$web_exit" "$web_evidence" "$model" "$provider" "$start" <<'PY'
 import datetime,json,pathlib,platform,subprocess,sys
-folder,web_exit,web_evidence,model,provider,when,measurements=sys.argv[1:]
+folder,web_exit,web_evidence,model,provider,when=sys.argv[1:]
 folder=pathlib.Path(folder); summary=json.loads((folder/'summary.json').read_text())
 try:
     hw=subprocess.run(['system_profiler','SPHardwareDataType'],capture_output=True,text=True).stdout
@@ -84,15 +94,14 @@ except Exception: chip=display='unavailable'
 status='MEASURED' if summary.get('samples',0)>0 else 'NOT_MEASURED'
 if status=='MEASURED':
     cpu=summary['cpu_average_percent']; verdict='PASS' if cpu<10 else 'FAIL'
-    with open(measurements,'a') as f:
-        f.write(f"\n## WebKit 엔진 트리 CPU/RAM 실측 ({when})\n\n")
-        f.write(f"환경: {chip} / {platform.mac_ver()[0]} / 디스플레이 {display}; 측정 시작 {when}. 모델 식별자 `{model}`, provider `{provider}`. Web 재생 acceptance 증거 `{web_evidence}`, 계측 증거 `{folder}`.\n\n")
-        f.write(f"격리 web-probe 및 자식 WebKit 콘텐츠/GPU/Networking 프로세스를 1초 간격으로 측정: 표본 **{summary['samples']}**, CPU 평균/최대 **{cpu:.3f}% / {summary['cpu_max_percent']:.3f}%**, RSS 평균/최대 **{summary['rss_average_mib']:.2f} / {summary['rss_max_mib']:.2f} MiB**. 목표 CPU <10%: **{verdict}** (평균 기준). 프로세스 분해: `{folder}/summary.json`; 원시 표본: `{folder}/process-samples.jsonl`.\n")
+    report=f"## WebKit engine process CPU/RSS ({when})\n\nEnvironment: {chip} / macOS {platform.mac_ver()[0]} / {display}. Model `{model}` provider `{provider}`. Acceptance evidence `{web_evidence}`, samples `{folder}`.\n\nCPU average/max {cpu:.3f}% / {summary['cpu_max_percent']:.3f}%; RSS average/max {summary['rss_average_mib']:.2f} / {summary['rss_max_mib']:.2f} MiB; target <10%: {verdict}.\n"
 else:
-    with open(measurements,'a') as f:
-        f.write(f"\n## WebKit 엔진 트리 CPU/RAM 실측 ({when})\n\n측정 불가: {summary.get('reason','unknown reason')}. macOS {platform.mac_ver()[0]}, 모델 식별자 `{model}`, provider `{provider}`; 증거 `{folder}`. CPU <10% 목표 판정 불가이며 이전 측정치를 대체하지 않는다.\n")
-result={'status':status,'web_acceptance_exit':int(web_exit),'sampling':status,'samples':summary.get('samples',0),'cpu_average_percent':summary.get('cpu_average_percent'),'cpu_max_percent':summary.get('cpu_max_percent'),'rss_average_mib':summary.get('rss_average_mib'),'rss_max_mib':summary.get('rss_max_mib'),'process_breakdown':summary.get('process_breakdown',{}),'evidence':str(folder),'web_evidence':web_evidence,'model':model,'provider':provider,'cpu_target':'<10%'}
+    report=f"## WebKit engine process CPU/RSS ({when})\n\nNOT MEASURED: {summary.get('reason','unknown reason')}. macOS {platform.mac_ver()[0]}, model `{model}` provider `{provider}`; evidence `{folder}`.\n"
+result={'status':status,'web_acceptance_exit':int(web_exit),'sampling':status,'samples':summary.get('samples',0),'cpu_average_percent':summary.get('cpu_average_percent'),'cpu_max_percent':summary.get('cpu_max_percent'),'rss_average_mib':summary.get('rss_average_mib'),'rss_max_mib':summary.get('rss_max_mib'),'process_breakdown':summary.get('process_breakdown',{}),'phase_measurements':summary.get('phase_measurements',{}),'evidence':str(folder),'web_evidence':web_evidence,'model':model,'provider':provider,'cpu_target':'<10%'}
 (folder/'result.json').write_text(json.dumps(result,indent=2))
+for name, values in summary.get('phase_measurements',{}).items():
+    report += f"- {name}: {values['samples']} samples, CPU avg/max {values['cpu_average_percent']:.3f}/{values['cpu_max_percent']:.3f}%, RSS avg/max {values['rss_average_mib']:.2f}/{values['rss_max_mib']:.2f} MiB.\\n"
+(folder/'measurements-report.md').write_text(report)
 print(json.dumps(result,indent=2))
 PY
 cat "$evidence/web-acceptance.log"

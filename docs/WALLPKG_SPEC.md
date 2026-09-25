@@ -112,6 +112,7 @@ active.json의 선택적 `gravity` 오버라이드는 같은 패키지를 다른
   "type": "web",
   "entry": "index.html",
   "preview": "preview.png",
+  "powerPolicy": "auto",
   "author": "Wallbloom"
 }
 ```
@@ -138,6 +139,18 @@ WKWebView 구현의 navigation/resource delegate와 실제 네트워크 차단 �
 반환한다. 패키지 JS가 상호작용 모드를 스스로 활성화하거나 종료를 가로챌 수 없다.
 
 #### Web pause 및 저전력 계약
+
+Web 패키지의 선택 필드 `powerPolicy`는 `"auto"` 또는 `"alwaysActive"`다. 생략 시
+`"auto"`이며, 타입이 아니거나 알 수 없는 문자열이어도 호환성을 위해 `"auto"`로
+정규화한다. `auto`에서는 전원 연결 상태에서 정상 프레임으로 실행하고 배터리에서는
+엔진 주입 rAF 하이브리드 스로틀을 1fps로 설정한다. 저전력 모드 또는 다른 풀스크린
+윈도우가 배경화면을 완전히 덮으면 현재 프레임을 `takeSnapshot`으로 캡처한 뒤
+`contentView`를 이미지로 교체해 WKWebView를 계층에서 분리하고 WebKit `.suspend`를
+적용한다. 상호작용 진입 시 재부착·resume·정상 프레임으로 복구한다. `alwaysActive`는
+이 자동 프레임/스냅샷 정책에서 제외하되 기존 pause 계약은 유지한다. 전원 변화 감지는
+최대 15초 주기이며 저전력은 시스템 power-state 알림으로 갱신한다. 창 목록의 전체
+화면 덮임 판정은 공개 CGWindowList 정보에 한정되므로 권한/Spaces별 가림을 완전히
+판별하지 못할 수 있으며, 이를 일반적인 모든 가림 검출로 간주하지 않는다.
 
 WKWebView 공개 API는 AVPlayer처럼 임의의 페이지 JavaScript 실행/타이머를 강제로
 suspend하지 않는다. 따라서 web pause는 **엔진 미디어 정지 + 페이지의 협력적 pause

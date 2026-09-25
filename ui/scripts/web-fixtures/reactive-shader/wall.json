@@ -3,6 +3,7 @@
   "id": "reactive-shader",
   "title": "Reactive Shader Test",
   "type": "web",
+  "powerPolicy": "bad-value",
   "entry": "index.html",
   "preview": "preview.png",
   "loop": true,

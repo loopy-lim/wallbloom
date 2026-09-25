@@ -105,3 +105,128 @@
 - native GUI: rustra scan, WebView DOM card select, trusted OS Enter, OpenUI 패널, localhost download progress/completion 및 503 UI 통과. 13,104,509 byte payload 일치, progress 215회, staging/failure cleanup 통과. 설치 앱 PID 68589와 사용자 active.json 부재 상태 전후 보존.
 - 증거 디렉터리: hotswap `/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T/wallbloom-hotswap-evidence-10qlygun`; native `/var/folders/z8/h16kj6d16t53dj0lfvlkxf0h0000gn/T/wallbloom-native-evidence-ywnPJ0`; 재현/버전 상세 `ui/INTEGRATIONS.md`.
 - 환경 모델 식별자는 `PI_PROVIDER=openai-codex`, `PI_MODEL=gpt-6-luna` (worker 환경 출처, 라우팅 attestation 아님). 앱은 API key/Codex OAuth를 읽거나 서비스 자격증명으로 사용하지 않는다. Swift clean rebuild, CPU/RAM 회귀, 물리 마우스, UI 선택부터 프레임까지 단일 지연, wallpkg 전체 외부 호환성은 미검증.
+
+## 웹 CPU 절감 대안 조사 (web-cpu-alternatives-2, 2026-09-25)
+
+> 목표: web 배경화면의 WebKit 트리 CPU(직렬 재측정 4회 평균 13.362/13.531/14.262/14.771%, 목표 <10% 전부 FAIL, `MEASUREMENTS.md`)를 **"보기만 하는 용도"** 전제로 낮추는 대안을 조사하고 우선순위를 확정한다. 이 절은 조사·문서 기록이며 코드 변경은 없다. 1차 실행(loop-34c69f29…)은 조사만 하고 이 문서에 기록하지 않아 alternatives-documented 검사가 실패했다. 이번에는 기록까지 포함한다.
+
+### 근거 원천 (1차 자료)
+
+- 설치된 SDK 공개 헤더: `$(xcrun --show-sdk-path)/System/Library/Frameworks/WebKit.framework/Headers/` 아래 `WKPreferences.h`, `WKWebView.h`, `WKSnapshotConfiguration.h`, `WKWebpagePreferences.h` (macOS 26 SDK, 본문에 직접 인용).
+- 현재 엔진 소스: `engine/main.swift` (`installWebWindows`, `applyPlaybackState`, `setInteractive`, WebPackage CSP/콘텐츠 룰).
+- 기존 실측: `MEASUREMENTS.md`의 WebKit 트리 CPU/RAM 4회 기록, `ui/scripts/verify-web-perf.sh` 샘플링 방식.
+- **자체 프로브 실측(이번 신규)**: `/tmp/wallbloom-cpu-research/`의 독립 Swift 프로브(저장소 밖, 코드 변경 없음). fixture heavy 셰이더와 동일한 WebGL 로직을 1024×768pt 가시 창에서 구동, `verify-web-perf.sh`와 같은 ps 프로세스 트리 합산을 1초 간격 수집. **절대값은 전체 화면 wallpaper 측정과 비교 불가**이며, 아래에서는 변형 간 상대비와 정성 증거(프레임 카운터)만 근거로 사용한다. 임시 디렉터리는 소거될 수 있으므로 수치를 본문에 전부 기록한다.
+
+### 프로브 실측 요약 (draw 빈도가 CPU를 지배한다)
+
+| 변형 (페이지 기법) | 실측 draw 빈도 | CPU 평균 (%) | CPU 최대 (%) | 비고 |
+|---|---:|---:|---:|---|
+| unlimited (매 rAF draw) | 약 63fps | 2.662 | 3.2 | 표본 13 |
+| cap30gate (현재 fixture의 rAF gate) | 약 21~23fps | 2.108 | 2.5 | gate 방식은 30fps에도 못 미침, 절감 약 21% |
+| timer10 (setTimeout+단일 rAF 하이브리드) | 약 10.3fps | 0.592 | 0.7 | unlimited 대비 약 22% |
+| **timer1 (1fps 저빈도 갱신)** | 약 1.0fps | **0.008** | 0.1 | 사실상 무료, unlimited 대비 약 0.3% |
+| static (첫 프레임 후 정지) | 1회 | 0.000 | 0.0 | 스냅샷 폴백의 페이지 측 등가 |
+| snapshot (엔진이 캡처 후 뷰 계층에서 분리) | 분리 후 0 | 2.367(부착) → **0.000**(분리) | 0.0 | 8.4초 분리 구간 표본 6 |
+
+snapshot 변형의 정성 증거: `inactiveSchedulingPolicy = .suspend` 상태에서 `WKWebView`를 뷰 계층에서 분리하자 분리 8.4초 동안 프레임 카운터가 동결됐다(분리 직전 138 → 재부착 2.5초 후 197, 증분 59프레임 ≈ 재부착 구간 2.5초 × 약 23fps분. JS가 계속 돌았다면 약 190프레임이 더 늘었어야 함). 재부착 후 rAF가 정상 재개됐다. RSS는 스냅샷 NSImageView 비트맵만큼 74.7→110.5 MiB(+35.8) 증가했다. 이는 "스냅샷 폴백으로 JS/레이아웃이 완전히 멈추고 상호작용 시 원복 가능"함을 본 머신에서 직접 증명한 결과다.
+
+### 방향 1: WKWebView/WebKit 공개 설정 기반
+
+| 대안 | 예상 절감 근거 | 난이도 | 위험 | 검증 |
+|---|---|---|---|---|
+| 이미 적용된 설정 유지: `setAllMediaPlaybackSuspended`(`WKWebView.h`, macOS 12+), `mediaTypesRequiringUserActionForPlayback = .all`, `javaScriptCanOpenWindowsAutomatically = false`, nonPersistent store — `engine/main.swift` `applyPlaybackState`/`installWebWindows` | 미디어 중심 페이지 절감. 현재 fixture는 미디어가 없어 추가 절감 여지 작음(13%대 유지가 간접 증거) | — | — | 기존 `verify-web.sh` |
+| `WKPreferences.inactiveSchedulingPolicy` (macOS 14+, `WKPreferences.h`) | 헤더 원문: "when it is inactive **and detached from the view hierarchy** … A suspended web view will **pause JavaScript execution and page layout**". 단, 현재 엔진은 WKWebView가 항상 창에 부착돼 있어 단독으로는 무효. **스냅샷 폴백(부착 해제)과 결합할 때만 유효** → 방향 3의 핵심 근거 | 낮음(설정 1줄) | detachment 조건을 모르고 쓰면 효과 없음 | 프로브의 프레임 동결 관찰(위 표) |
+| `WKWebpagePreferences.allowsContentJavaScript = false` (macOS 11+) | 헤더 원문: JS 비실행. 단 "your application can still execute JavaScript using evaluateJavaScript … WKUserScripts" — 엔진 훅(`window.wallbloom`)은 유지 가능. 정적 HTML/CSS 패키지 폴백용 | 낮음 | JS 기반 패키지를 무력화 → 패키지 선언 또는 폴백 전용으로 제한해야 함 | 정적 fixture CPU 측정 |
+| WKWebView 프레임레이트 자체를 캡하는 공개 설정 | **공개 헤더에 존재하지 않음**(헤더 검색 결과 없음). 따라서 프레임 캡은 페이지 주입(방향 2) 또는 스냅샷 폴백(방향 3)으로만 가능 | — | — | — |
+| `prefers-reduced-motion` 강제 | 공개 API로 웹뷰별 강제 수단 없음. 시스템 Reduce Motion 설정을 페이지가 자발적으로 존중하는 구조(표준 미디어 쿼리) | 문서 수준 | 강제 아님 | 패키지 제작 가이드 |
+
+### 방향 2: 페이지 측 기법
+
+| 대안 | 예상 절감 근거 | 난이도 | 위험 | 검증 |
+|---|---|---|---|---|
+| rAF/setInterval 저빈도화(1fps~10fps) — 엔진이 `WKUserScript`(atDocumentStart, mainFrameOnly, 공개 API, 엔진이 이미 `window.wallbloom` 훅 주입에 사용)로 `requestAnimationFrame`/`setInterval`을 래핑해 주입 | 프로브: 10fps 0.592%, **1fps 0.008%**(unlimited 2.662% 대비). wallpaper 수준 외삽 시 13%대 → 1% 미만 추정(선형 비례 가정, **추정 표시**) | 중 | (1) 페이지 타이밍 가정 깨짐 → 애니메이션이 계단식으로 변함(배경화면 용도로는 수용 가능). (2) 상호작용 시 원본 rAF 복원 필요(주입 스크립트에 `window.wallbloom.setFrameRate()` 형태의 해제 훅 포함). (3) 게이트 방식은 60Hz rAF 콜백 자체가 계속 돌므로 절감이 제한적(프로브 cap30gate 2.108%) — **setTimeout 대기 + 단일 rAF 하이브리드여야 실제 저빈도** | `verify-web-perf.sh` 재측정 <10%, fixture에 프레임 카운터 검증 추가 |
+| 현재 fixture의 rAF gate 30fps | 프로브에서 실측 21~23fps, 절감 약 21%(2.662→2.108%) — **목표 <10% 달성에 불충분** | — | — | 기존 MEASUREMENTS.md 13%대와 정합 |
+| `prefers-reduced-motion` 존중, visibility 기반 정지 | 표준 미디어 쿼리/`document.visibilityState`이나, 데스크톱 레벨 창은 WebKit에 visible로 보여 자동 스로틀을 기대할 수 없음(본 실측 13% 유지가 간접 정합. WebKit 내부 스로틀 정책 세부는 공개 문서 확인 필요 — **추측 표시**) | 페이지 제작자 협력 | 보장 없음 | 가이드 문서 |
+| CSS transform/opacity GPU 애니메이션, 정적 이미지·CSS 그라디언트 | JS 루프 제거로 절감이 논리적으로 기대되나 본 프로브 미측정 — **추측 표시** | 페이지 제작자 | 시각 자유도 제한 | 별도 fixture 측정 필요 시 추가 |
+
+### 방향 3: 엔진 측 스냅샷 / 1fps 저빈도 갱신 + 상호작용 원복 (추천 1순위)
+
+설계: (a) 상호작용이 없는 기본 상태에서 일정 시간(예: 10초) 경과 후 `WKWebView.takeSnapshot(with:completionHandler:)`(`WKWebView.h`, macOS 10.13+, 공개 API; `WKSnapshotConfiguration.rect`/`snapshotWidth`로 해상도 조절 가능)로 현재 화면을 캡처 → 창의 contentView를 NSImageView로 교체해 WKWebView를 뷰 계층에서 분리 → `inactiveSchedulingPolicy = .suspend`와 결합해 JS/레이아웃 완전 정지. 애니메이션이 필요한 패키지는 대안 (b) 엔진 주입 1fps 스로틀로 저빈도 갱신. (c) 상호작용 시작 시(`setInteractive(true)`, 기존 경로 존재) 원본 WKWebView를 재부착하고 스로틀을 해제해 원복, 종료 시 다시 폴백. 타임아웃·저전력(`applyPlaybackState`의 lowPower 경로)·화면 전환 시에도 동일 폴백 재적용.
+
+- 예상 절감: 프로브에서 부착 2.367% → 분리 0.000%. draw가 0회가 되므로 남는 것은 WebKit 유휴 오버헤드와 정적 이미지 합성뿐. wallpaper 수준 절대치는 재측정 필요(**추정**), 1fps 경로는 timer1 비율 기준 13%대 → 1% 미만 추정. 목표 <10% 달성 가능성이 가장 높다.
+- 난이도: 중. 변경은 `engine/main.swift` 단일 파일이고 상호작용 원복 경로(`setInteractive`), 일시정지 경로(`applyPlaybackState`), 화면 재구성(`didChangeScreenParametersNotification`)이 이미 존재해 상태 전이만 추가하면 된다.
+- 위험: (1) 시계/뉴스 티커 등 실시간성 페이지가 멈춰 보임 → 패키지별 opt-out 또는 1fps 경로 선택. (2) 스냅순간 시각 불일치 — 스냅샷 직전 프레임과 이미지가 동일하므로 시각 연속성은 유지되나 재부착 첫 프레임 지연 가능. (3) 화면당 스냅샷 비트맵 RAM(프로브 1024×768pt@2x에서 +35.8 MiB; 풀스크린 Retina 2x는 약 30 MB/화면 추정, `snapshotWidth`로 저감 가능). (4) 분리 조건은 "view hierarchy로부터 detached"여야 하므로 window를 숨기는 방식이 아니라 contentView 교체가 필요(헤더 조건).
+- 검증: `verify-web-perf.sh` 재측정(격리 HOME, CPU <10% 목표), `verify-web.sh` 보안/입력/왕복 회귀, 스냅샷 전후 창 캡처 픽셀 일치, 재부착 후 rAF 재개 카운터(프로브 방식을 harness에 이식), 원복 상호작용에서 OS-posted 입력 왕복. 미검증은 PASS로 취급하지 않는다.
+
+### 방향 4: 타 앱 사례
+
+Wallpaper Engine 등의 웹 배경화면은 게임 실행 시 정지, 배경화면별 프레임 제한, 저전력 연동 같은 저전력 처리를 제공한다고 알려져 있으나, 이번 오프라인 환경에서 원문 문서를 확인하지 못했다 — **추측 표시**, 설계 참고로만 사용. Wallbloom 엔진에는 이미 `isLowPowerModeEnabled` 관찰과 `willSleepNotification` 연동(`engine/main.swift` `setupObservers`)이 있어 동일 방향 확장 지점으로 유효하다.
+
+### 추천 우선순위 (보기 전용 전제)
+
+1. **엔진 측 스냅샷 폴백 + 상호작용 시 원복** (필요 시 1fps 저빈도 병행). 이유: 유일하게 공개 API가 JS 실행·레이아웃 정지를 명시하는 경로이고(`WKPreferences.h` inactiveSchedulingPolicy + takeSnapshot), 본 머신 프로브에서 CPU 2.367%→0.000%, 분리 중 프레임 동결, 재부착 재개까지 직접 검증됐다. 현재 13%대 vs 목표 <10% 괴리를 구조적으로 해소한다.
+2. 엔진 주입 1fps rAF/setInterval 스로틀 — 스냅샷 정지가 부자연한 실시간성 패키지용(프로브 0.008% 근거).
+3. `allowsContentJavaScript = false` 정적 폴백 — 정적/선언형 패키지 한정.
+4. 패키지 제작 가이드(prefers-reduced-motion, CSS 위주 애니메이션, 저주파 자체 스로틀 권장) — 문서 수준.
+보류: 프라이빗 API 기반 스로틀(정책 위반), visibility 의존 자동 정지(데스크톱 레벨에서 무효), gate식 30fps 유지(절감 불충분).
+
+### 후속 구현 시 변경될 파일 경계 (이번 실행은 코드 변경 없음)
+
+- `engine/main.swift` — 유일한 제품 코드 변경점: `installWebWindows`(스냅샷/스로틀 상태 추가), `applyPlaybackState`(저전력·일시정지와 폴백 통합), `setInteractive`(원복 진입/종료).
+- `docs/WALLPKG_SPEC.md` §3 — web pause 계약에 스냅샷 폴백/저빈도 명시(문서).
+- `ui/scripts/web-fixtures/`(스냅샷·1fps 모드 fixture)와 `ui/scripts/verify-web-perf.sh`(재측정) — 테스트 전용.
+- `MEASUREMENTS.md` — 재측정 기록.
+
+한계: 프로브 창은 1024×768pt로 전체 화면이 아니므로 절대 CPU를 wallpaper 수준으로 읽지 않는다(상대비·정성 증거만 사용). wallpaper 수준 절대 절감은 후속 구현 후 `verify-web-perf.sh` 재측정으로 확정해야 한다. 프로브 원시 데이터: `/tmp/wallbloom-cpu-research/*.analysis.json`, `*.jsonl`, `*.markers`. 모델 식별자: `PI_MODEL=glm-5.3-flash`, `PI_PROVIDER=zai`(환경 보고값, 라우팅 증명 아님).
+
+## 저전력 웹 렌더러 조사 (lowpower-browser-research)
+
+조사 범위는 **보기 전용 배경화면에서 1~30fps 동작을 유지**하는 경우다. 현재 Wallbloom은 화면마다 WKWebView를 만들며 WebKit 트리 평균 CPU가 13.362%, 14.262%, 14.771%(디스플레이 설정별; `MEASUREMENTS.md`)로 목표 <10%를 넘는다. 기존 조사/실측에 따르면 WKWebView를 snapshot으로 대체하고 view hierarchy에서 분리하면 `inactiveSchedulingPolicy = .suspend`가 JS/layout을 멈추며, 분리 구간 CPU 0.000%였다. 이 수치와 다른 엔진의 이론상 기능은 직접 비교 가능한 벤치마크가 아니다.
+
+### 대안별 1차 근거 및 평가
+
+| 선택 | macOS arm64 / 라이선스 | 임베딩, WebGL, fps | 크기 및 판단 |
+|---|---|---|---|
+| **CEF windowless/off-screen** | CEF 공식 플랫폼 빌드는 macOS용이지만, 확인한 CEF API 문서만으로 최신 배포물에 arm64 아키텍처가 모두 포함되는지 확정할 수 없다. 채택 시 다운로드한 고정 버전의 `Chromium Embedded Framework.framework`와 helper binary의 `lipo -archs`를 검사해야 한다. CEF 자체는 BSD-style, Chromium 구성요소의 개별 고지도 함께 준수해야 한다. | `CefBrowserSettings.windowless_frame_rate`는 windowless `OnPaint` 최대 fps이며 최소 1, 기본 30; 런타임 `CefBrowserHost::SetWindowlessFrameRate`로 조절 가능. 목표 1~30fps를 API가 직접 지원한다. `windowless_rendering_enabled`와 `CefRenderHandler::OnPaint`로 렌더링 버퍼를 받아 AppKit surface에 합성해야 한다. 헤더는 WebGL 설정 가능을 명시하나 하드웨어 지원에 의존. Chromium급 HTML 호환성이 장점이며 WKWebView 코드/보안 경계/입력/화면 lifecycle은 재구현 필요(높은 난이도). | Chromium 프레임워크, helper, locale/resources를 함께 배포하는 **대형 의존성(수백 MB급 설치물 가능)**. 버전/압축/필수 resource 구성에 따라 크게 달라지므로 공식 문서에서 단일 크기는 확인 불가; 실제 arm64 app bundle 실측이 필요. FPS cap이 WebView의 JS timer/DOM 계산 모두를 같은 비율로 제한한다고 보장하지는 않는다. |
+| **Ultralight** | 공식 배포/가격 정보는 macOS 플랫폼을 지원한다고 표시하나, 읽은 자료만으로 macOS arm64 아티팩트 제공 여부는 확인 불가(릴리스별 확인 필요). 라이선스는 현재 공식 가격 페이지에서 Indie 조건(연매출 및 투자 각 $100K 미만) 상업 사용 가능 및 그 이상 Pro 라이선스 요구를 표시한다. 제품 출시 전 해당 시점의 계약을 확인. 과거 AGPL로 배포됐다는 주장은 현재 공식 페이지로 검증하지 못했으므로 여기서 AGPL이라고 단정하지 않는다. | C/C++ API로 뷰 생성/표시 및 렌더 target 연동이 필요해 중~높은 native 통합 난이도. API 문서에서 프레임 cap 1~30 또는 WebGL 지원의 구체 보장을 확인하지 못함: 둘 다 검증 필요/불확실. HTML/CSS는 Chromium/WebKit 완전 대체로 간주할 수 없으며 호환성 평가 필요. | 공식 자료에서 arm64 runtime 크기의 확정 수치를 확인하지 못함. 패키지/실제 산출물 측정 필요. 라이선스 비용/조건과 미확정 WebGL이 주요 위험. |
+| **Sciter** | 공식 SDK 저장소에 `build.macosx`와 `demos.osx` 존재는 macOS 지원을 입증하지만, arm64 slice 여부는 해당 배포 바이너리의 `file`/`lipo` 검사 전 미확정. Sciter SDK는 상용 임베딩 라이선스를 안내하며 재배포/제품 조건을 확인해야 한다. | 공식 SDK의 native API로 host window에 임베딩. 별도 CSS/스크립트 엔진으로 Chromium/WebKit과 웹 표준 호환성이 다름. WebGL 지원과 1~30fps native cap은 이번에 확인한 1차 자료에서 근거를 찾지 못함(불확실). 세부 custom-draw/timer 제어는 가능하더라도 엔진 전체 절전 cap과 동치라고 보지 않는다. 난이도 높음. | SDK 바이너리 용량은 공식 고정치 미확인. CEF보다 작을 가능성은 추정일 뿐, 후보 버전의 arm64 runtime과 실제 bundle로 확인해야 한다. |
+| **Servo / 실험 엔진** | Servo 공식 README는 64-bit macOS 개발을 명시하지만 macOS **arm64 지원/안정된 임베딩 SDK**를 보증하지 않는다. Servo는 prototype browser engine이며 MPL-2.0 라이선스(저장소 LICENSE)다. | 실험적 Rust engine API/embedder이며 안정된 macOS wallpaper host API, offscreen fps cap, WebGL의 제품용 보장을 확인할 수 없음. 통합/유지보수 위험 매우 높음. | 일반 사용자가 붙일 수 있는 안정판 arm64 embed binary 및 크기 근거 없음. 연구/프로토타입 외 비추천. |
+| **WKWebView 유지 + snapshot / 1fps** | 현재 제품 API와 macOS 지원 유지, 추가 제3자 license/dependency 없음. | 기존 `takeSnapshot`, 이미지 표시, view 분리, `.suspend` 사용. 1fps 지속 움직임은 페이지 측 또는 엔진 정책이 필요하며 WKWebView 자체의 공개 fps cap은 없음. 기존 WebGL 동작을 유지할 수 있으나 스냅샷 상태에서는 정지 화면. 구현 난이도 중간, 기존 화면/보안/입력 경로 재사용. | 추가 엔진 바이너리 없음. Retina 다중 화면 비트맵은 메모리 추가(기존 조사 프로브에서 1024×768pt@2x snapshot 때 +35.8 MiB; 전체 화면 환산은 해상도별 실측 필요). |
+
+### 공식 선례: CEF 및 배경화면 앱
+
+- CEF upstream `include/internal/cef_types.h`의 `cef_browser_settings_t.windowless_frame_rate` 주석은 WLS `OnPaint` 최대 프레임률, 최소 1/default 30 및 동적 `SetWindowlessFrameRate`를 명시한다. 같은 헤더는 `webgl` 설정이 가능하나 hardware support에 좌우된다고 명시한다. `include/cef_browser.h`는 창 없는 브라우저의 paint handler 및 off-screen rendering 인터페이스를 정의한다.
+- Wallpaper Engine 공식 디자이너 문서에는 **FPS Limiter** 항목이 있고, 웹 배경화면 문서가 web wallpaper 제작을 다룬다. 문서만으로 그 앱 내부가 CEF인지 직접 증명하지 못하므로 **Wallpaper Engine이 CEF를 사용한다는 주장은 확인 불가**로 남긴다. 이 조사는 “CEF 기반”이라는 유통 설명을 1차 근거 없이 사실로 채택하지 않는다. FPS limiter 선례 자체는 공식 문서로 확인된다.
+- Lively 공식 GitHub 프로젝트 `rocksdanister/lively-cef`는 자기 설명이 “Lively Wallpaper Browser Plugin”이며 CEF 플러그인 저장소로 공개돼 있다. Lively 메인 저장소도 이를 연결한다. 이는 **CEF 기반 web 경로의 강한 1차 소스 근거**다. 다만 Lively의 web wallpaper에 사용자가 선택 가능한 FPS 제한이 있다는 점은 이번에 확인한 공식 소스에서 검증되지 않았다. 추정하지 않는다.
+
+### 3개 경로 비교 및 추천
+
+절감량은 엔진간 같은 fixture/기기 비교가 없어 정성/미측정으로 구분한다. 현 단계에서 “CEF가 더 낮은 CPU”라는 실측 증거는 없다.
+
+| 순위/경로 | CPU 절감 기대 | 웹 호환성 | 구현 난이도 / 유지보수 | 의존성 |
+|---|---|---|---|---|
+| **1 — WKWebView + snapshot 기본, 필요 콘텐츠만 1fps로 계속 갱신** | snapshot 정지 구간은 기존 프로브에서 CPU 0.000% 관측(해당 프로브 조건). 1fps timer 변형은 별도 프로브 0.008%였으나 전체 화면 제품 수치 아님. 실제 배경화면 재측정 필수. | 정지 snapshot은 모든 콘텐츠를 정지 이미지로 보여주며, 1fps는 복잡한 애니메이션/게임형 web 콘텐츠를 크게 저하시킴. 재부착 시 기존 WebKit/WebGL 호환성 유지. | 중간. 기존 엔진과 interaction 경로를 재사용하며 새 엔진 lifecycle/배포물 없음. snapshot 메모리와 상태전이를 검증. | 없음(기존 WebKit). |
+| **2 — WKWebView 실시간 재생 유지 + CEF WLS 대체/선택형 backend** | FPS cap이 CPU를 줄일 수 있으나 감소율은 **미측정**; Chromium 프로세스와 compositing 비용으로 증가할 수도 있음. 실제 A/B 벤치마크 없이는 절감 단정 불가. | Chromium 계열 표준 지원이 강점. WKWebView와 차이 및 CEF WebGL/GPU 경로 검증 필요. | 매우 높음: CEF 초기화/helper processes, AppKit offscreen surface 합성, IPC/lifecycle, 보안 정책, arm64 서명·업데이트·크래시 분석과 큰 버전 업데이트 부담. | 매우 큼(Chromium runtime). arm64 bundle 사이즈 측정 전 미확정. |
+| **3 — 혼합: WK snapshot이 기본, CEF는 명시적 호환 모드** | 보통 콘텐츠는 suspend 이득을 얻고 호환성 민감 콘텐츠는 CEF에서 cap 적용 가능하나, CEF CPU 비용은 미측정. | WebKit 우선 + Chromium fallback은 선택 폭이 넓으나 backend 차이/패키지별 호환성 분기가 생김. | 가장 높음(두 엔진 테스트 매트릭스, 설정/지원/장애처리). CEF 수요와 실제 이득이 입증되기 전 구현하지 않음. | CEF 전체 bundle 추가. |
+
+**권고:** 1순위는 WKWebView 유지 + 기본 snapshot/suspend 및 사용자가 움직임을 택한 콘텐츠에 한해 저빈도(초기 1fps 후보, 상한 30fps 정책은 별도 설계) 재생을 검증한다. 기존 실측에서 suspend CPU 0.000%이고 구현/유지비/추가 바이너리가 가장 낮다. 움직임을 유지하는 1fps가 제품 체감에 충분한지 사용자 확인이 필요하다. 2순위 CEF는 snapshot 후에도 실제 콘텐츠의 최소 요구 fps를 만족하지 못하고 WKWebView 대비 CPU <10%를 같은 fixture에서 증명한 경우에만 제한된 기술 프로토타입으로 진행한다. CEF fps API는 목표 범위에 정확히 맞지만 프레임 상한은 CPU 절감률 보장이 아니다. 3순위 혼합은 CEF의 호환성 이점/수요와 bundle 비용이 계측·승인된 뒤에만 고려한다. Ultralight/Sciter/Servo는 arm64·WebGL·fps cap 또는 계약/성숙도 공백 때문에 현 제품 후보에서 제외한다.
+
+### 후속 결정 및 검증 필요
+
+1. 제품 기본값을 정지 snapshot, 1fps, 사용자 선택 fps 중 무엇으로 할지와 상호작용 시 원복/opt-out을 승인한다. 움직임 1fps가 “보기 전용”에 수용 가능한지 UX 결정이 필요하다.
+2. 동일 M1 Max, 동일 webpkg, 동일 해상도/창 수/측정 구간에서 WK live, snapshot detached, WK 1fps를 재측정한다. CEF 실험을 승인한다면 동일 fixture CEF WLS 1/10/30fps도 별도 빌드로 측정하고 CPU 평균/RSS/전력 및 시각 품질을 기록한다.
+3. CEF 검토 착수 전 배포 버전과 arm64 slice, helper/resource 포함 최종 app 크기, BSD 및 Chromium notices, signing/notarization, 업데이트 전략을 고정한다. Ultralight/Sciter는 공급사의 arm64 runtime/WebGL/fps 문서와 상용 재배포 계약을 서면 확인한다.
+4. Wallpaper Engine 내부 엔진과 Lively fps UI 제한 여부는 현재 확보한 1차 소스에서 확인되지 않은 채로 남는다. 추후 repo/tag별 코드·제품 공식 문서가 발견되기 전까지 확정 표현 금지.
+
+### 출처 (1차 자료)
+
+- CEF API header `cef_types.h`: https://github.com/chromiumembedded/cef/blob/master/include/internal/cef_types.h (windowless_frame_rate, webgl, macOS helper 경로).
+- CEF browser API: https://github.com/chromiumembedded/cef/blob/master/include/cef_browser.h ; CEF license: https://github.com/chromiumembedded/cef/blob/master/LICENSE.txt .
+- Wallpaper Engine 공식 웹 FPS limiter: https://docs.wallpaperengine.io/en/web/performance/fps.html ; 웹 콘텐츠 공식 문서: https://docs.wallpaperengine.io/en/web/overview.html .
+- Lively 공식 CEF plugin source: https://github.com/rocksdanister/lively-cef ; 프로젝트: https://github.com/rocksdanister/lively .
+- Ultralight 공식 가격/라이선스/플랫폼 정보: https://ultralig.ht/pricing/ . SDK 상세 문서는 이번 조사 환경에서 접근 제한으로 확인하지 못함.
+- Sciter SDK 공식 저장소: https://github.com/c-smile/sciter-sdk (macOS build/demo 경로 및 SDK 라이선스 안내).
+- Servo 공식 upstream README/license: https://github.com/servo/servo ; 릴리스: https://github.com/servo/servo/releases .
+- 제품 실측/현재 구현: `MEASUREMENTS.md`, `engine/main.swift`, `docs/WALLPKG_SPEC.md` §2 Web pause.
+
+모델 식별자: 환경 보고값 `PI_PROVIDER=openai-codex`, `PI_MODEL=gpt-6-luna` (`openai-codex/gpt-6-luna`). 이는 worker 실행 환경 식별자이며 독립 라우팅 증명은 아니다. 비OpenAI 라우팅이 수행되지 않았다는 별도 attestation은 제공되지 않음.
